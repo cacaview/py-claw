@@ -14,16 +14,18 @@ from pydantic import TypeAdapter
 
 from py_claw.mcp.resources import extract_error_payload, extract_result_payload, normalize_resource_contents, normalize_resource_list
 from py_claw.schemas.common import (
-    McpClaudeAIProxyServerConfig,
     McpCapabilities,
+    McpClaudeAIProxyServerConfig,
     McpHttpServerConfig,
+    McpSSEIDEServerConfig,
+    McpSdkServerConfig,
     McpServerConfigForProcessTransport,
     McpServerInfo,
     McpServerStatusModel,
     McpSSEServerConfig,
-    McpSdkServerConfig,
     McpStdioServerConfig,
     McpToolInfo,
+    McpWebSocketIDEServerConfig,
     McpWebSocketServerConfig,
 )
 from py_claw.settings.loader import SettingsLoadResult
@@ -256,17 +258,24 @@ class _SdkMcpTransport:
     def request(self, message: Any) -> Any:
         """Send a JSON-RPC request via SDK message handler.
 
+        The SDK transport requires sdk_message_handler to be set on McpRuntime.
+        This handler provides the communication bridge to the external SDK process.
+
         Args:
             message: JSON-RPC message dict
 
         Returns:
             Response from SDK handler
+
+        Raises:
+            NotImplementedError: If no sdk_message_handler is configured on McpRuntime.
         """
         with self._lock:
             if self._message_handler is None:
                 raise NotImplementedError(
-                    f"SDK transport for '{self._name}' has no message handler configured. "
-                    "Set sdk_message_handler on McpRuntime or use a direct SDK process."
+                    f"SDK transport for '{self._name}' requires sdk_message_handler to be set on McpRuntime. "
+                    "Use McpRuntime.set_sdk_message_handler() to provide an SDK message bridge. "
+                    "SDK transport cannot operate without a message handler."
                 )
             response = self._message_handler(self._name, message)
             return {} if response is None else response
@@ -690,6 +699,19 @@ class McpRuntime:
             return self._dispatch_sdk_message(config, message)
         if isinstance(config, McpClaudeAIProxyServerConfig):
             return self._dispatch_claudeai_proxy_message(config, message)
+        if isinstance(config, McpSSEIDEServerConfig):
+            # IDE extensions use SSE transport with the configured URL
+            sse_transport = _SseMcpTransport(config.url, None)
+            return sse_transport.request(message)
+        if isinstance(config, McpWebSocketIDEServerConfig):
+            # IDE extensions use WebSocket transport with the configured URL and optional auth token
+            headers = {"Authorization": f"Bearer {config.authToken}"} if config.authToken else None
+            ws_transport = _WebSocketMcpTransport(
+                url=config.url,
+                headers=headers,
+                ping_interval_seconds=None,
+            )
+            return ws_transport.request(message)
         if isinstance(config, McpHttpServerConfig):
             return _send_http_message(config, message)
         if isinstance(config, McpSSEServerConfig):
@@ -710,10 +732,10 @@ class McpRuntime:
                 env=stdio_config.env,
             ).request(message)
         transport_type = getattr(config, "type", None) or "stdio"
-        supported = ["http", "sse", "websocket", "stdio", "sdk", "claudeai-proxy"]
+        supported = ["http", "sse", "sse-ide", "websocket", "ws-ide", "stdio", "sdk", "claudeai-proxy"]
         raise NotImplementedError(
             f"MCP transport '{transport_type}' is not implemented. Supported transports: {', '.join(supported)}. "
-            "To use SDK or claudeai-proxy transports, additional implementation is required."
+            "SDK and claudeai-proxy transports require sdk_message_handler to be set on McpRuntime."
         )
 
 
@@ -724,6 +746,25 @@ class McpRuntime:
             return
         if isinstance(config, McpClaudeAIProxyServerConfig):
             self._dispatch_claudeai_proxy_notification(config, message)
+            return
+        if isinstance(config, McpSSEIDEServerConfig):
+            sse_transport = _SseMcpTransport(config.url, None)
+            try:
+                sse_transport.request(message)
+            except Exception:
+                pass
+            return
+        if isinstance(config, McpWebSocketIDEServerConfig):
+            headers = {"Authorization": f"Bearer {config.authToken}"} if config.authToken else None
+            ws_transport = _WebSocketMcpTransport(
+                url=config.url,
+                headers=headers,
+                ping_interval_seconds=None,
+            )
+            try:
+                ws_transport.request(message)
+            except Exception:
+                pass
             return
         if isinstance(config, McpHttpServerConfig):
             # HTTP servers typically don't process notifications, but we can try

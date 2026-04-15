@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import json
 import shutil
 import subprocess
+import threading
 from typing import Any
 
 from pydantic import ValidationError
@@ -942,6 +944,40 @@ class HookRuntime:
     def _execute_command_hook(self, hook: BashCommandHook, hook_input: dict[str, Any], cwd: str) -> HookExecutionRecord:
         command = self._shell_command(hook)
         timeout = hook.timeout if hook.timeout is not None else self.default_timeout_seconds
+        event_name = hook_input.get("hook_event_name", "unknown")
+
+        # Handle async hooks: run in background thread, return immediately
+        if hook.async_:
+            result_holder: dict[str, Any] = {}
+
+            def run_async_hook() -> None:
+                try:
+                    completed = subprocess.run(
+                        command,
+                        input=json.dumps(hook_input),
+                        capture_output=True,
+                        text=True,
+                        cwd=cwd,
+                        timeout=timeout,
+                        check=False,
+                    )
+                    result_holder["completed"] = completed
+                except Exception as exc:
+                    result_holder["error"] = str(exc)
+
+            thread = threading.Thread(target=run_async_hook, daemon=True)
+            thread.start()
+            # Fire-and-forget: return immediately with exit_code -1 to indicate async
+            return HookExecutionRecord(
+                event=event_name,
+                command=hook.command,
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                structured_output=None,
+            )
+
+        # Synchronous execution (blocking)
         completed = subprocess.run(
             command,
             input=json.dumps(hook_input),
@@ -952,7 +988,7 @@ class HookRuntime:
             check=False,
         )
         return HookExecutionRecord(
-            event=hook_input["hook_event_name"],
+            event=event_name,
             command=hook.command,
             exit_code=completed.returncode,
             stdout=completed.stdout,

@@ -12,6 +12,8 @@ from py_claw.services.keybindings.service import (
     is_keybinding_customization_enabled,
     load_keybindings,
     save_keybindings,
+    get_shortcut_display,
+    get_all_shortcuts_for_display,
 )
 from py_claw.services.keybindings.types import Keybinding, KeybindingsConfig, KeybindingsResult
 
@@ -25,6 +27,8 @@ __all__ = [
     "save_keybindings",
     "generate_keybindings_template",
     "get_keybindings_info",
+    "get_shortcut_display",
+    "get_all_shortcuts_for_display",
     "Keybinding",
     "KeybindingsConfig",
     "KeybindingsResult",

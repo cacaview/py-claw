@@ -104,6 +104,7 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         }
         #repl-message-log {
             height: 1fr;
+            max-height: 60%;
         }
         #repl-prompt-input {
             height: auto;
@@ -121,6 +122,18 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             display: none;
         }
         Screen.narrow #repl-footer {
+            display: none;
+        }
+
+        /* Short terminal adaptations (height < 20 rows) */
+        Screen.short ReplScreen {
+            /* Minimal footer for short terminals */
+        }
+        Screen.short #repl-footer {
+            display: none;
+        }
+        Screen.short #pi-mode-bar {
+            height: 0;
             display: none;
         }
         """
@@ -159,12 +172,17 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             self._update_narrow_mode()
 
         def _update_narrow_mode(self) -> None:
-            """Apply or remove narrow terminal class based on width."""
+            """Apply or remove narrow/short terminal class based on dimensions."""
             width = self.size.width
+            height = self.size.height
             if width < 80:
                 self.screen.add_class("narrow")
             else:
                 self.screen.remove_class("narrow")
+            if height < 20:
+                self.screen.add_class("short")
+            else:
+                self.screen.remove_class("short")
 
         def _screen(self) -> REPLScreen:
             return self.query_one(REPLScreen)

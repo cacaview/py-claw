@@ -47,24 +47,24 @@ def get_default_keybindings() -> list[Keybinding]:
         List of default Keybinding objects
     """
     return [
-        Keybinding(key="ctrl+o", command="open", description="Open file"),
-        Keybinding(key="ctrl+s", command="save", description="Save file"),
-        Keybinding(key="ctrl+c", command="copy", description="Copy"),
-        Keybinding(key="ctrl+v", command="paste", description="Paste"),
-        Keybinding(key="ctrl+z", command="undo", description="Undo"),
-        Keybinding(key="ctrl+y", command="redo", description="Redo"),
-        Keybinding(key="ctrl+b", command="toggle-sidebar", description="Toggle sidebar"),
+        Keybinding(key="enter", command="submit", description="Submit prompt"),
+        Keybinding(key="esc", command="interrupt", description="Interrupt / cancel / close"),
+        Keybinding(key="up", command="history-up", description="Navigate history / suggestions"),
+        Keybinding(key="down", command="history-down", description="Navigate history / suggestions"),
+        Keybinding(key="tab", command="accept-suggestion", description="Accept suggestion / complete"),
+        Keybinding(key="right", command="accept-ghost-text", description="Accept inline ghost text"),
+        Keybinding(key="?", command="toggle-help", description="Toggle this help menu"),
+        Keybinding(key="ctrl+g", command="new-session", description="New session"),
+        Keybinding(key="ctrl+l", command="clear-log", description="Clear log"),
+        Keybinding(key="ctrl+r", command="history-search", description="History search"),
         Keybinding(key="ctrl+p", command="quick-open", description="Quick open file"),
-        Keybinding(key="ctrl+shift+p", command="command-palette", description="Command palette"),
-        Keybinding(key="ctrl+`", command="toggle-terminal", description="Toggle terminal"),
-        Keybinding(key="ctrl+/", command="toggle-comment", description="Toggle line comment"),
-        Keybinding(key="ctrl+shift+k", command="delete-line", description="Delete line"),
-        Keybinding(key="alt+up", command="move-line-up", description="Move line up"),
-        Keybinding(key="alt+down", command="move-line-down", description="Move line down"),
-        Keybinding(key="ctrl+space", command="suggest", description="Trigger suggestion"),
-        Keybinding(key="ctrl+shift+space", command="parameter-hints", description="Parameter hints"),
-        Keybinding(key="ctrl+shift+o", command="outline", description="Show outline"),
-        Keybinding(key="ctrl+shift+g", command="git", description="Show git view"),
+        Keybinding(key="ctrl+m", command="model-picker", description="Model picker"),
+        Keybinding(key="ctrl+t", command="tasks-panel", description="Tasks panel"),
+        # Vim mode bindings
+        Keybinding(key="i", command="vim-insert", description="Insert mode (vim)"),
+        Keybinding(key="a", command="vim-append", description="Append mode (vim)"),
+        Keybinding(key="v", command="vim-visual", description="Visual mode (vim)"),
+        Keybinding(key="escape", command="vim-normal", description="Normal mode (vim)"),
     ]
 
 
@@ -163,4 +163,69 @@ def get_keybindings_info() -> dict:
             {"key": kb.key, "command": kb.command, "description": kb.description}
             for kb in bindings
         ],
+    }
+
+
+# ── shortcut display helpers ──────────────────────────────────────────────────
+
+# Maps command names to their display-key strings (for help menu / footer hints)
+_SHORTCUT_DISPLAY_MAP: dict[str, str] = {
+    "submit": "enter",
+    "interrupt": "esc",
+    "history-up": "↑",
+    "history-down": "↓",
+    "accept-suggestion": "tab",
+    "accept-ghost-text": "→",
+    "toggle-help": "?",
+    "new-session": "ctrl+g",
+    "clear-log": "ctrl+l",
+    "history-search": "ctrl+r",
+    "quick-open": "ctrl+p",
+    "model-picker": "ctrl+m",
+    "tasks-panel": "ctrl+t",
+    "vim-insert": "i",
+    "vim-append": "a",
+    "vim-visual": "v",
+    "vim-normal": "esc",
+    "cycle-mode": "shift+tab",
+}
+
+
+def get_shortcut_display(action: str) -> str | None:
+    """Get display text for a shortcut action.
+
+    Args:
+        action: Command/action name (e.g. "submit", "toggle-help")
+
+    Returns:
+        Human-readable shortcut string like "↑ / ↓" for "history-up/down"
+        or None if no shortcut exists.
+    """
+    return _SHORTCUT_DISPLAY_MAP.get(action)
+
+
+def get_all_shortcuts_for_display() -> dict[str, str]:
+    """Get all shortcuts mapped to their display strings for the help menu.
+
+    Returns:
+        Dictionary mapping action names to display strings,
+        suitable for HelpMenuDialog._shortcuts.
+    """
+    return {
+        "enter": "Submit prompt",
+        "esc": "Interrupt / cancel / close",
+        "↑ / ↓": "Navigate history / suggestions",
+        "tab": "Accept suggestion / complete",
+        "→": "Accept inline ghost text",
+        "?": "Toggle this help menu",
+        "ctrl+g": "New session",
+        "ctrl+l": "Clear log",
+        "ctrl+c": "Quit",
+        "ctrl+r": "History search",
+        "ctrl+p": "Quick open",
+        "ctrl+m": "Model picker",
+        "ctrl+t": "Tasks panel",
+        "i": "Insert mode (vim)",
+        "a": "Append mode (vim)",
+        "v": "Visual mode (vim)",
     }

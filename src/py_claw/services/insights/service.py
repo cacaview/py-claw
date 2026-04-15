@@ -440,22 +440,21 @@ def _entry_text_content(entry: dict[str, Any]) -> str:
     return str(content).strip()
 
 
-def summarize_transcript_if_needed(
+async def summarize_transcript_if_needed(
     transcript: str,
     config: InsightsConfig | None = None,
 ) -> str:
-    """Truncate transcript if under char limit; placeholder for LLM summarization.
+    """Summarize transcript using LLM when it exceeds char limit; otherwise return as-is.
 
-    When a real LLM client is wired in (future), this performs chunk summarization
-    per ClaudeCode-main/src/commands/insights.ts summarizeTranscriptChunk.
-    For now, truncate to avoid losing context.
+    When transcript exceeds the configured limit, chunks it and summarizes each chunk
+    using the LLM to preserve key information while reducing length.
 
     Args:
         transcript: Plain-text transcript.
         config: InsightsConfig controlling thresholds.
 
     Returns:
-        The (possibly truncated/summarized) transcript.
+        The (possibly summarized) transcript.
     """
     cfg = config or _insights_config
     limit = cfg.transcript_summary_char_limit
@@ -464,12 +463,65 @@ def summarize_transcript_if_needed(
     if len(transcript) <= limit:
         return transcript
 
-    # Split into chunks and take first + last portion (cheap approximation)
-    # Real implementation would call LLM summarization per chunk.
-    head = transcript[:chunk_size]
-    tail = transcript[-chunk_size:]
-    overlap = "\n... [session truncated] ...\n"
-    return head + overlap + tail
+    # LLM-based chunk summarization
+    summaries: list[str] = []
+    chunks = _chunk_text(transcript, chunk_size)
+
+    for i, chunk in enumerate(chunks):
+        summary = await _summarize_chunk_llm(chunk, i + 1, len(chunks))
+        summaries.append(summary)
+
+    return "\n\n---\n\n".join(summaries)
+
+
+def _chunk_text(text: str, chunk_size: int) -> list[str]:
+    """Split text into chunks of approximately chunk_size characters."""
+    if len(text) <= chunk_size:
+        return [text]
+    chunks: list[str] = []
+    # Split on double newlines first to preserve paragraph structure
+    paragraphs = text.split("\n\n")
+    current: list[str] = []
+    current_len = 0
+    for para in paragraphs:
+        if current_len + len(para) + 2 > chunk_size and current:
+            chunks.append("\n\n".join(current))
+            current = [para]
+            current_len = len(para)
+        else:
+            current.append(para)
+            current_len += len(para) + 2
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+async def _summarize_chunk_llm(chunk: str, chunk_num: int, total: int) -> str:
+    """Summarize a transcript chunk using LLM."""
+    try:
+        from py_claw.services.api import AsyncAnthropicClient
+        from py_claw.services.api.types import Message, MessageCreateParams
+
+        client = AsyncAnthropicClient()
+        system = (
+            "You are a coding assistant summarizing a Claude Code session transcript. "
+            "Extract the key topics, tools used, files modified, and outcomes. "
+            "Write 2-4 concise bullet points. Be specific about what was accomplished."
+        )
+        user = f"[Chunk {chunk_num}/{total}]\n\n{chunk[:20_000]}"
+        params = MessageCreateParams(
+            model="claude-sonnet-4-20250514",
+            messages=[Message(role="user", content=user)],
+            system=system,
+            max_tokens=512,
+        )
+        result = await client.create_message(params)
+        text = result.content[0].text if result.content else ""
+        return f"[Chunk {chunk_num} summary]\n{text.strip()}"
+    except Exception as exc:
+        logger.debug("LLM summarization failed for chunk %d: %s", chunk_num, exc)
+        # Fallback: return first 500 chars of chunk
+        return f"[Chunk {chunk_num} summary]\n{chunk[:500]}..."
 
 
 # ---------------------------------------------------------------------------
@@ -688,20 +740,37 @@ def detect_multi_clauding(metas: list[SessionMeta]) -> MultiClaudingStats:
 # ---------------------------------------------------------------------------
 
 
-def generate_narrative_sections(
+async def generate_narrative_sections(
     data: AggregatedInsightsData,
     facets: list[SessionFacet],
 ) -> NarrativeSections:
-    """Generate human-readable narrative sections from aggregated data.
+    """Generate human-readable narrative sections from aggregated data using LLM.
 
-    This is a pure-text stub for now.  The full TS implementation calls an LLM
-    per section with JSON-only output.  When a model client is wired in, replace
-    the stubs below with actual async calls.
+    Calls the LLM to generate each narrative section with JSON-only output mode.
+    Falls back to rule-based narratives if LLM call fails.
     """
-    # Basic fallback narratives
     top_tool = max(data.tool_counts, key=data.tool_counts.get) if data.tool_counts else None
     top_lang = max(data.languages, key=data.languages.get) if data.languages else None
 
+    # Build a concise data summary for the LLM
+    data_summary = {
+        "total_sessions": data.total_sessions,
+        "active_days": data.active_days,
+        "total_messages": data.total_messages,
+        "top_tool": top_tool,
+        "top_language": top_lang,
+        "lines_added": data.lines_added,
+        "lines_removed": data.lines_removed,
+        "files_modified": list(data.files_modified)[:20],
+        "languages": list(data.languages)[:10],
+        "friction_points": list(data.friction_counts.keys())[:5] if data.friction_counts else [],
+    }
+
+    narrative = await _generate_narrative_llm(data_summary)
+    if narrative:
+        return narrative
+
+    # Fallback: rule-based narratives
     at_a_glance = (
         f"You've had {data.total_sessions} sessions across {data.active_days} active days, "
         f"processing {data.total_messages:,} messages."
@@ -723,6 +792,43 @@ def generate_narrative_sections(
         friction_analysis=_summarize_friction(data.friction_counts),
         suggestions="\n".join(f"- {s}" for s in suggestions),
     )
+
+
+async def _generate_narrative_llm(data: dict[str, Any]) -> NarrativeSections | None:
+    """Generate narrative sections using LLM with JSON-only output. Returns None on failure."""
+    try:
+        import json
+
+        from py_claw.services.api import AsyncAnthropicClient
+        from py_claw.services.api.types import Message, MessageCreateParams
+
+        client = AsyncAnthropicClient()
+        system = (
+            "You are a coding assistant analyzing Claude Code session insights. "
+            "Generate a brief narrative with these four sections based on the session data. "
+            "Return ONLY valid JSON with keys: at_a_glance, what_works, friction_analysis, suggestions. "
+            "Each value should be 1-3 sentences. "
+            "Be specific and actionable."
+        )
+        user = json.dumps(data, indent=2)
+        params = MessageCreateParams(
+            model="claude-sonnet-4-20250514",
+            messages=[Message(role="user", content=user)],
+            system=system,
+            max_tokens=1024,
+        )
+        result = await client.create_message(params)
+        text = result.content[0].text if result.content else ""
+        parsed = json.loads(text.strip())
+        return NarrativeSections(
+            at_a_glance=parsed.get("at_a_glance", ""),
+            what_works=parsed.get("what_works", ""),
+            friction_analysis=parsed.get("friction_analysis", ""),
+            suggestions=parsed.get("suggestions", ""),
+        )
+    except Exception as exc:
+        logger.debug("LLM narrative generation failed: %s", exc)
+        return None
 
 
 def _summarize_friction(friction: dict[str, int]) -> str:
@@ -768,7 +874,7 @@ async def generate_insights_report(
         transcripts: dict[str, str] = {}
         for m in metas:
             raw = format_transcript_for_facets(m)
-            transcripts[m.session_id] = summarize_transcript_if_needed(raw)
+            transcripts[m.session_id] = await summarize_transcript_if_needed(raw)
 
         # Phase E: load/create facets
         facets: list[SessionFacet] = []
@@ -786,8 +892,8 @@ async def generate_insights_report(
         agg = aggregate_insights_data(metas, facets)
         agg.multi_clauding = detect_multi_clauding(metas)
 
-        # Phase H: narratives (stub)
-        agg.narratives = generate_narrative_sections(agg, facets)
+        # Phase H: narratives (LLM-driven)
+        agg.narratives = await generate_narrative_sections(agg, facets)
 
         # Build legacy UsageStats + SessionInsight for backwards compat
         usage_stats = UsageStats(

@@ -174,6 +174,13 @@ class PromptInput(Vertical):
             super().__init__()
             self.mode = mode
 
+    class SuggestionIndexChanged(Message):
+        """Emitted when the selected suggestion index changes (arrow key navigation)."""
+
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
     # ── init ────────────────────────────────────────────────────────────────
 
     def __init__(
@@ -208,6 +215,7 @@ class PromptInput(Vertical):
         self._history_pos: int = -1  # -1 = live buffer
         # Unified suggestion engine (commands + paths + shell history)
         self._engine = suggestion_engine
+        self._suggestion_viewport_size = 8
 
     # ── compose ─────────────────────────────────────────────────────────────
 
@@ -265,6 +273,8 @@ class PromptInput(Vertical):
     def watch_selected_index(self, index: int) -> None:
         """Re-render suggestion list when selection changes."""
         self._update_suggestion_list()
+        # Notify parent (REPLScreen) so it can sync footer selected_index
+        self.post_message(self.SuggestionIndexChanged(index))
 
     def _update_suggestion_list(self) -> None:
         """Build and display the suggestion list."""
@@ -278,15 +288,29 @@ class PromptInput(Vertical):
 
             theme = get_theme()
             dim = theme.colors.get("text_dim", "#555555")
-            muted = theme.colors.get("text_muted", "#888888")
             accent = "yellow"
 
+            total = len(self.suggestion_items)
+            sel = self.selected_index
+            if sel < 0:
+                sel = 0
+
+            viewport = min(self._suggestion_viewport_size, total)
+            start = 0
+            if total > viewport:
+                start = max(0, sel - (viewport // 2))
+                start = min(start, total - viewport)
+            end = min(total, start + viewport)
+
             lines: list[str] = []
-            for i, item in enumerate(self.suggestion_items):
+            if start > 0:
+                lines.append(f"[{dim}]↑ {start} more[/]")
+
+            for i in range(start, end):
+                item = self.suggestion_items[i]
                 is_selected = i == self.selected_index
                 prefix = "▶" if is_selected else " "
 
-                # Unified Suggestion (ui/typeahead.py)
                 if hasattr(item, "display_text"):
                     display = item.display_text.strip()
                     desc = getattr(item, "description", "") or ""
@@ -301,6 +325,7 @@ class PromptInput(Vertical):
                     display = str(item)
                     desc = ""
                     type_tag = ""
+                    arg_hint = ""
 
                 if is_selected:
                     parts = [f"[{accent}]{prefix} {display}[/]"]
@@ -316,6 +341,9 @@ class PromptInput(Vertical):
                     if arg_hint:
                         line += f" [{dim}]{arg_hint}[/]"
                     lines.append(line)
+
+            if end < total:
+                lines.append(f"[{dim}]↓ {total - end} more[/]")
 
             list_widget.update("\n".join(lines))
         except Exception:
@@ -579,6 +607,17 @@ class PromptInput(Vertical):
             return
 
         if event.key == "up":
+            if self.suggestion_items:
+                # Navigate suggestion list (wraps up to last, but stops at first)
+                count = len(self.suggestion_items)
+                if count == 0:
+                    return
+                if self.selected_index <= 0:
+                    self.selected_index = count - 1  # wrap to last
+                else:
+                    self.selected_index -= 1
+                event.stop()
+                return
             if not self._history:
                 return
             if self._history_pos == -1:
@@ -589,6 +628,17 @@ class PromptInput(Vertical):
             event.stop()
 
         elif event.key == "down":
+            if self.suggestion_items:
+                # Navigate suggestion list (stops at last — no wrap)
+                count = len(self.suggestion_items)
+                if count == 0:
+                    return
+                if self.selected_index >= count - 1:
+                    pass  # stay at last item
+                else:
+                    self.selected_index += 1
+                event.stop()
+                return
             if self._history_pos == -1:
                 return
             self._history_pos += 1
@@ -598,3 +648,28 @@ class PromptInput(Vertical):
             else:
                 inp.value = self._history[self._history_pos]
             event.stop()
+
+        # Page Up / Page Down — jump by page size in suggestion list
+        PAGE_SIZE = 5
+
+        if event.key == "pageup":
+            if self.suggestion_items:
+                count = len(self.suggestion_items)
+                if count == 0:
+                    return
+                cur = self.selected_index if self.selected_index >= 0 else 0
+                new_index = (cur - PAGE_SIZE) % count  # wraps to last
+                self.selected_index = new_index
+                event.stop()
+
+        elif event.key == "pagedown":
+            if self.suggestion_items:
+                count = len(self.suggestion_items)
+                if count == 0:
+                    return
+                cur = self.selected_index if self.selected_index >= 0 else 0
+                new_index = cur + PAGE_SIZE
+                if new_index >= count:
+                    new_index = count - 1  # stop at last, don't wrap
+                self.selected_index = new_index
+                event.stop()

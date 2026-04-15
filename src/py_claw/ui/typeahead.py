@@ -38,6 +38,9 @@ class SuggestionType(str, Enum):
     COMMAND = "command"
     PATH = "path"
     SHELL_HISTORY = "shell_history"
+    SHELL_COMPLETION = "shell_completion"
+    AGENT = "agent"
+    CHANNEL = "channel"
     MID_INPUT_SLASH = "mid_input_slash"
 
 
@@ -130,10 +133,19 @@ class SuggestionEngine:
     def __init__(
         self,
         command_items: list[CommandItem] | None = None,
-        max_results: int = 12,
+        max_results: int = 100,
+        teammates: dict | None = None,
+        agent_names: dict | None = None,
     ) -> None:
         self._command_items: list[CommandItem] = list(command_items or [])
         self._max_results = max_results
+        self._teammates = teammates or {}
+        self._agent_names = agent_names or {}
+
+    def set_team_context(self, teammates: dict, agent_names: dict) -> None:
+        """Update team context for @agent suggestions."""
+        self._teammates = teammates
+        self._agent_names = agent_names
 
     def set_command_items(self, items: list[CommandItem]) -> None:
         """Update the command registry."""
@@ -147,7 +159,10 @@ class SuggestionEngine:
         1. Mid-input slash command (e.g. "see /bug" with cursor after "/bu")
         2. Start-of-input slash — COMMAND if a command matches, else PATH
         3. Path-like token (e.g. "~/", "./", "../")
-        4. Shell history match (for bare text)
+        4. @-mention agent suggestion (teammates)
+        5. #-mention channel suggestion (Slack MCP)
+        6. Shell completion (bare text that looks like a shell command token)
+        7. Shell history match (for bare text >= 2 chars)
         """
         if not text:
             return None
@@ -178,11 +193,63 @@ class SuggestionEngine:
         if self._is_path_like(text):
             return SuggestionType.PATH
 
-        # Case 4: Shell history — bare text >= 2 chars
-        if len(text.strip()) >= 2 and not text.startswith("/"):
+        trimmed = text.strip()
+
+        # Case 4: @-mention agent — e.g. "@" or "@foo"
+        if re.search(r"(^|\s)@([\w-]*)$", trimmed):
+            return SuggestionType.AGENT
+
+        # Case 5: #-mention channel — e.g. "#" or "#general"
+        if re.search(r"(^|\s)#([a-z0-9][a-z0-9_-]*)$", trimmed):
+            return SuggestionType.CHANNEL
+
+        # Case 6: Shell completion — bare text that looks like a shell command
+        # Only triggers when text is short (compgen for subcommands/flags)
+        if trimmed and len(trimmed) <= 3 and not trimmed.startswith("/"):
+            if self._is_shell_command_token(trimmed):
+                return SuggestionType.SHELL_COMPLETION
+
+        # Case 7: Shell history — bare text >= 2 chars
+        if len(trimmed) >= 2 and not trimmed.startswith("/"):
             return SuggestionType.SHELL_HISTORY
 
         return None
+
+    def _is_shell_command_token(self, text: str) -> bool:
+        """Check if text looks like a shell command token (alphanumeric, dashes, etc)."""
+        return bool(text) and text.isalnum()
+
+    async def get_suggestions_async(
+        self,
+        text: str,
+        cursor_offset: int,
+        abort_signal: Callable[[], bool] | None = None,
+    ) -> list[Suggestion]:
+        """Async version of get_suggestions that includes shell completions.
+
+        Args:
+            text: The current input text
+            cursor_offset: Current cursor position
+            abort_signal: Optional callable that returns True to abort
+        """
+        sug_type = self.detect_type(text, cursor_offset)
+
+        if sug_type == SuggestionType.MID_INPUT_SLASH:
+            return self._get_mid_input_suggestions(text, cursor_offset)
+        if sug_type == SuggestionType.COMMAND:
+            return self._get_command_suggestions(text)
+        if sug_type == SuggestionType.PATH:
+            return self._get_path_suggestions(text)
+        if sug_type == SuggestionType.SHELL_HISTORY:
+            return self._get_shell_history_suggestions(text)
+        if sug_type == SuggestionType.SHELL_COMPLETION:
+            return await self._get_shell_completion_suggestions(text, cursor_offset, abort_signal)
+        if sug_type == SuggestionType.AGENT:
+            return self._get_agent_suggestions(text)
+        if sug_type == SuggestionType.CHANNEL:
+            return self._get_channel_suggestions(text)
+
+        return []
 
     def get_suggestions(
         self,
@@ -345,3 +412,101 @@ class SuggestionEngine:
             )
             for cmd in cmds
         ]
+
+    async def _get_shell_completion_suggestions(
+        self,
+        text: str,
+        cursor_offset: int,
+        abort_signal: Callable[[], bool] | None = None,
+    ) -> list[Suggestion]:
+        """Get shell completion suggestions using compgen."""
+        from py_claw.utils.bash.shell_completion import get_shell_completions
+
+        results = await get_shell_completions(text, cursor_offset, abort_signal)
+        return [
+            Suggestion(
+                type=SuggestionType.SHELL_COMPLETION,
+                id=r.id,
+                display_text=r.display_text,
+                description=r.description or "shell completion",
+                tag="completion",
+            )
+            for r in results[: self._max_results]
+        ]
+
+    def _get_agent_suggestions(self, text: str) -> list[Suggestion]:
+        """Get @-mention agent suggestions from teammates and agent registry."""
+        # Extract partial after "@"
+        match = re.search(r"(^|\s)@([\w-]*)$", text.strip())
+        if not match:
+            return []
+        partial = match.group(2).lower()
+
+        suggestions: list[Suggestion] = []
+
+        # Teammates from team_context
+        for name, info in self._teammates.items():
+            if partial and name.lower()[:len(partial)] != partial:
+                continue
+            color = info.get("color") if isinstance(info, dict) else getattr(info, "color", None)
+            suggestions.append(
+                Suggestion(
+                    type=SuggestionType.AGENT,
+                    id=f"dm-{name}",
+                    display_text=f"@{name}",
+                    description=info.get("agent_type") if isinstance(info, dict) else getattr(info, "agent_type", ""),
+                    tag="agent",
+                    metadata={"name": name, "color": color},
+                )
+            )
+
+        # Agent name registry entries
+        for name, agent_id in self._agent_names.items():
+            if partial and name.lower()[:len(partial)] != partial:
+                continue
+            # Avoid duplicates with teammates
+            if any(s.id == f"dm-{name}" for s in suggestions):
+                continue
+            suggestions.append(
+                Suggestion(
+                    type=SuggestionType.AGENT,
+                    id=f"dm-{name}",
+                    display_text=f"@{name}",
+                    description=f"agent: {agent_id}",
+                    tag="agent",
+                    metadata={"name": name, "agent_id": agent_id},
+                )
+            )
+
+        return suggestions[: self._max_results]
+
+    def _get_channel_suggestions(self, text: str) -> list[Suggestion]:
+        """Get #-mention channel suggestions.
+
+        Real Slack channel suggestions require a connected Slack MCP server.
+        This provides a stub that searches teammates' channel knowledge,
+        or returns an empty list with a hint when no MCP is available.
+        """
+        # Extract partial after "#"
+        match = re.search(r"(^|\s)#([a-z0-9][a-z0-9_-]*)$", text.strip())
+        if not match:
+            return []
+        partial = match.group(2).lower()
+
+        # Stub: suggest common Slack-style channel names based on partial match.
+        # Real implementation queries Slack MCP server via slack_search_channels tool.
+        common_channels = ["general", "random", "dev", "eng", "ops", "announcements", "help", "debug"]
+        suggestions: list[Suggestion] = []
+        for channel in common_channels:
+            if not partial or channel.startswith(partial):
+                suggestions.append(
+                    Suggestion(
+                        type=SuggestionType.CHANNEL,
+                        id=f"#{channel}",
+                        display_text=f"#{channel}",
+                        description="Slack channel (connect Slack MCP for live suggestions)",
+                        tag="channel",
+                    )
+                )
+
+        return suggestions[: self._max_results]

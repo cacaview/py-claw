@@ -288,6 +288,13 @@ class REPLScreen(Vertical):
                 update_tui_vim_mode(mode)
                 return
 
+            # Suggestion index changed (arrow navigation)
+            if cls_name == 'PromptInput.SuggestionIndexChanged':
+                event.stop()
+                footer = self.query_one("#repl-footer", PromptFooter)
+                footer.selected_index = event.index  # type: ignore[attr-defined]
+                return
+
             # History search result
             if cls_name == 'HistorySearchDialog.Selected':
                 event.stop()
@@ -346,25 +353,7 @@ class REPLScreen(Vertical):
 
         dialog = HelpMenuDialog(
             commands=self._command_items,
-            shortcuts={
-                "enter": "Submit prompt",
-                "esc": "Interrupt / close",
-                "↑ / ↓": "Navigate suggestions / history",
-                "tab": "Accept suggestion",
-                "→": "Accept ghost text",
-                "ctrl+g": "New session",
-                "ctrl+l": "Clear log",
-                "ctrl+c": "Quit",
-                "ctrl+r": "History search",
-                "ctrl+p": "Quick open",
-                "ctrl+m": "Model picker",
-                "ctrl+t": "Tasks panel",
-                # Vim mode
-                "i": "Insert mode (vim)",
-                "a": "Append mode (vim)",
-                "v": "Visual mode (vim)",
-                "esc": "Normal mode (vim)",
-            },
+            shortcuts=None,  # Use keybindings service defaults
             on_close=on_close,
             id="overlay-help-menu",
         )
@@ -417,6 +406,28 @@ class REPLScreen(Vertical):
         footer.set_status(status)
         footer.set_loading(status == "running")
 
+    # ── status pills ─────────────────────────────────────────────────────
+
+    def set_bridge_status(self, label: str, color: str) -> None:
+        """Set bridge status pill in the footer."""
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.set_bridge_status(label, color)
+
+    def set_agent_count(self, count: int) -> None:
+        """Set agent count pill in the footer."""
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.set_agent_count(count)
+
+    def set_task_count(self, count: int) -> None:
+        """Set task count pill in the footer."""
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.set_task_count(count)
+
+    def set_team_count(self, count: int) -> None:
+        """Set team count pill in the footer."""
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.set_team_count(count)
+
     def set_model(self, model: str) -> None:
         """Update the model name."""
         self._model = model
@@ -440,7 +451,9 @@ class REPLScreen(Vertical):
         prompt = self.query_one("#repl-prompt-input", PromptInput)
         prompt.set_suggestion_items(items)
         footer = self.query_one("#repl-footer", PromptFooter)
-        footer.set_suggestions(items, -1)
+        # Sync selected_index from prompt to footer
+        footer.selected_index = prompt.selected_index
+        footer.set_suggestions(items, prompt.selected_index)
         # Publish to global store
         try:
             from py_claw.state.tui_state import update_tui_suggestions

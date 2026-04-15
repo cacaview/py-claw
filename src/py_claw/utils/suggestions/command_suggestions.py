@@ -194,7 +194,7 @@ def generate_command_suggestions(
         commands: Optional list of CommandItem or dict to search
 
     Returns:
-        List of matching suggestions sorted by relevance
+        List of matching suggestions sorted by relevance (with usage boosting)
     """
     if commands is None:
         commands = _COMMAND_REGISTRY
@@ -219,11 +219,17 @@ def generate_command_suggestions(
                 tag=_get_command_kind(cmd),
                 metadata=_get_command_metadata(cmd),
             )
-            for cmd in visible[:20]
+            for cmd in visible
         ]
 
     # Filter and score commands
     scored: list[tuple[int, SuggestionItem]] = []
+    try:
+        from py_claw.services.suggestions.usage_tracking import get_usage_tracker
+        tracker = get_usage_tracker()
+    except Exception:
+        tracker = None
+
     for cmd in commands:
         if _is_command_hidden(cmd):
             continue
@@ -246,6 +252,13 @@ def generate_command_suggestions(
         else:
             continue
 
+        # Apply usage boosts: frequency + recency (lower final score = better rank)
+        if tracker is not None:
+            freq_boost = tracker.get_frequency_boost(name)
+            recency_boost = tracker.get_recency_boost(name)
+            # 70% base score weight, 20% frequency, 10% recency
+            score = score * 0.7 + (-freq_boost * 0.2) + (-recency_boost * 0.1)
+
         scored.append(
             (
                 score,
@@ -261,7 +274,7 @@ def generate_command_suggestions(
 
     # Sort by score, then by name length
     scored.sort(key=lambda x: (x[0], len(x[1].display_text)))
-    return [item for _, item in scored[:15]]
+    return [item for _, item in scored]
 
 
 def get_best_command_match(
@@ -344,6 +357,13 @@ def apply_command_suggestion(
     new_input = format_command(command_name)
     on_input_change(new_input)
     set_cursor_offset(len(new_input))
+
+    # Record usage for frequency-based ranking
+    try:
+        from py_claw.services.suggestions.usage_tracking import get_usage_tracker
+        get_usage_tracker().record_usage(command_name)
+    except Exception:
+        pass
 
     if on_submit and suggestion.metadata:
         cmd_type = suggestion.metadata.get("type")

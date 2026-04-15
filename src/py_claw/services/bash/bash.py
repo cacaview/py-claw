@@ -358,5 +358,14 @@ async def get_shell_completions(
 
     Supports bash and zsh shells.
     """
-    # This would need actual shell execution - placeholder
-    return []
+    from py_claw.utils.bash.shell_completion import get_shell_completions as _impl
+
+    results = await _impl(input, cursor_offset, abort_signal)
+    return [
+        {
+            "id": r.id,
+            "display_text": r.display_text,
+            "description": r.description,
+        }
+        for r in results
+    ]

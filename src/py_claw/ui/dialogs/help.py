@@ -18,6 +18,7 @@ from textual.app import ComposeResult
 from textual.containers import ScrollableContainer, Vertical
 from textual.widgets import Static
 
+from py_claw.services.keybindings import get_all_shortcuts_for_display
 from py_claw.ui.theme import get_theme
 from py_claw.ui.widgets.dialog import Dialog
 
@@ -104,15 +105,5 @@ class HelpMenuDialog(Dialog):
             self._on_close()
 
 
-# Default shortcuts displayed in the help menu
-_DEFAULT_SHORTCUTS: dict[str, str] = {
-    "enter": "Submit prompt",
-    "esc": "Interrupt / cancel / close",
-    "↑ / ↓": "Navigate history / suggestions",
-    "tab": "Accept suggestion / complete",
-    "→": "Accept inline ghost text",
-    "?": "Toggle this help menu",
-    "ctrl+g": "New session",
-    "ctrl+l": "Clear log",
-    "ctrl+c": "Quit",
-}
+# Default shortcuts displayed in the help menu (derived from keybindings service)
+_DEFAULT_SHORTCUTS: dict[str, str] = get_all_shortcuts_for_display()

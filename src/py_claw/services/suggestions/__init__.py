@@ -25,6 +25,10 @@ from py_claw.services.suggestions.suggestions import (
     is_path_like_token,
     parse_partial_path,
 )
+from py_claw.services.suggestions.usage_tracking import (
+    CommandUsageTracker,
+    get_usage_tracker,
+)
 
 __all__ = [
     # Types
@@ -51,4 +55,7 @@ __all__ = [
     "find_slash_command_positions",
     # Shell history
     "get_shell_history_completion",
+    # Usage tracking
+    "CommandUsageTracker",
+    "get_usage_tracker",
 ]

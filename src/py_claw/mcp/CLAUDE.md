@@ -71,12 +71,12 @@
   - `list_resource_templates()` 返回结构
   - `resources/list` / `resources/read` 的规范化返回
   - enable/disable 与 reconnect 的基础状态流转
-- 当前仍未补齐 SDK/claudeai-proxy transport、OAuth 鉴权、真实重连握手与持续会话测试
+- 当前仍未补齐 SDK/claudeai-proxy transport（需要外部 handler 注入）、OAuth 鉴权、真实重连握手与持续会话测试；IDE transport（sse-ide / ws-ide）已正确路由
 
 ## 常见问题 (FAQ)
 
 ### 当前 MCP 是否真的连外部 server？
-部分会。HTTP 和 SSE transport 已实现真实 JSON-RPC POST 请求；stdio 使用持久化子进程。但 SDK 和 claudeai-proxy transport 仍未实现。
+部分会。HTTP 和 SSE transport 已实现真实 JSON-RPC POST 请求；stdio 使用持久化子进程；sse-ide 和 ws-ide（IDE extension transport）已正确路由至对应 transport。SDK 和 claudeai-proxy transport 需要外部 `sdk_message_handler`（通过 `McpRuntime.set_sdk_message_handler()` 注入），不带 handler 时给出清晰 `NotImplementedError`。
 
 ### `scope` 一定是 local 吗？
 不是。settings 声明的 server 会按 source 映射到 `user/project/local`；只有 runtime 注入项固定为 `local`。

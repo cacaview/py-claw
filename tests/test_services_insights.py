@@ -289,16 +289,17 @@ def test_format_transcript_for_facets_produces_text(sample_session_log: SessionL
     assert "[tool: Bash]" in text
 
 
-def test_summarize_transcript_if_needed_returns_truncated_when_no_backend(
+@pytest.mark.asyncio
+async def test_summarize_transcript_if_needed_returns_truncated_when_no_backend(
     sample_session_log: SessionLog,
 ) -> None:
     """summarize_transcript_if_needed falls back to truncation without LLM."""
     meta = extract_session_meta(sample_session_log)
     text = format_transcript_for_facets(meta)
-    summary = summarize_transcript_if_needed(text)
-    # Without an LLM backend, it should return a truncation
+    summary = await summarize_transcript_if_needed(text)
+    # Without an LLM backend, it should return a truncation or summary
     assert len(summary) <= len(text)
-    assert "[Summary]" in summary or summary == text
+    assert "[Summary]" in summary or summary == text or "[Chunk" in summary
 
 
 # ---------------------------------------------------------------------------
