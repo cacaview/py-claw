@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
-    pass
+    from py_claw.ui.typeahead import CommandItem
 
 # -----------------------------------------------------------------------------
 # Types
@@ -105,14 +105,49 @@ def format_command(command: str) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Command name extraction (placeholder - would integrate with commands module)
+# Command name extraction
 # -----------------------------------------------------------------------------
 
-def get_command_name(command: dict) -> str:
-    """Get the name of a command from its metadata."""
-    if isinstance(command, dict):
-        return command.get("name", command.get("commandName", ""))
-    return ""
+def _get_command_name(cmd: CommandItem | dict) -> str:
+    """Get the name of a command from CommandItem or dict."""
+    if isinstance(cmd, dict):
+        return cmd.get("name", cmd.get("commandName", ""))
+    return cmd.name
+
+
+def _is_command_hidden(cmd: CommandItem | dict) -> bool:
+    """Check if command is hidden."""
+    if isinstance(cmd, dict):
+        return bool(cmd.get("isHidden", False))
+    return cmd.is_hidden
+
+
+def _get_command_aliases(cmd: CommandItem | dict) -> list[str]:
+    """Get command aliases."""
+    if isinstance(cmd, dict):
+        return list(cmd.get("aliases", []) or [])
+    return list(cmd.aliases)
+
+
+def _get_command_description(cmd: CommandItem | dict) -> str:
+    """Get command description."""
+    if isinstance(cmd, dict):
+        return str(cmd.get("description", "") or "")
+    return cmd.description
+
+
+def _get_command_kind(cmd: CommandItem | dict) -> str:
+    """Get command kind."""
+    if isinstance(cmd, dict):
+        return str(cmd.get("kind", "") or "")
+    return cmd.kind
+
+
+def _get_command_metadata(cmd: CommandItem | dict) -> dict[str, Any]:
+    """Get command metadata dict for SuggestionItem."""
+    if isinstance(cmd, dict):
+        return cmd
+    return cmd.to_dict()
 
 
 # -----------------------------------------------------------------------------
@@ -138,10 +173,10 @@ def _fuzzy_match(query: str, target: str) -> bool:
 # -----------------------------------------------------------------------------
 
 # Placeholder command registry - would be populated from commands module
-_COMMAND_REGISTRY: list[dict] = []
+_COMMAND_REGISTRY: list[CommandItem | dict] = []
 
 
-def register_commands(commands: list[dict]) -> None:
+def register_commands(commands: list[CommandItem | dict]) -> None:
     """Register commands for suggestion matching."""
     global _COMMAND_REGISTRY
     _COMMAND_REGISTRY = commands
@@ -149,14 +184,14 @@ def register_commands(commands: list[dict]) -> None:
 
 def generate_command_suggestions(
     input_str: str,
-    commands: list[dict] | None = None,
+    commands: list[CommandItem | dict] | None = None,
 ) -> list[SuggestionItem]:
     """
     Generate command suggestions based on input.
 
     Args:
         input_str: The current input (should start with "/")
-        commands: Optional list of command dicts to search
+        commands: Optional list of CommandItem or dict to search
 
     Returns:
         List of matching suggestions sorted by relevance
@@ -175,14 +210,14 @@ def generate_command_suggestions(
 
     # When just typing "/" without additional text
     if not query:
-        visible = [c for c in commands if not c.get("isHidden", False)]
+        visible = [c for c in commands if not _is_command_hidden(c)]
         return [
             SuggestionItem(
-                id=get_command_name(cmd),
-                display_text=format_command(get_command_name(cmd)),
-                description=cmd.get("description"),
-                tag=cmd.get("kind"),
-                metadata=cmd,
+                id=_get_command_name(cmd),
+                display_text=format_command(_get_command_name(cmd)),
+                description=_get_command_description(cmd),
+                tag=_get_command_kind(cmd),
+                metadata=_get_command_metadata(cmd),
             )
             for cmd in visible[:20]
         ]
@@ -190,12 +225,12 @@ def generate_command_suggestions(
     # Filter and score commands
     scored: list[tuple[int, SuggestionItem]] = []
     for cmd in commands:
-        if cmd.get("isHidden", False):
+        if _is_command_hidden(cmd):
             continue
 
-        name = get_command_name(cmd)
+        name = _get_command_name(cmd)
         name_lower = name.lower()
-        desc = (cmd.get("description") or "").lower()
+        desc = _get_command_description(cmd).lower()
 
         # Exact prefix match = highest score
         if name_lower == query:
@@ -206,7 +241,7 @@ def generate_command_suggestions(
             score = 2
         elif _fuzzy_match(query, name_lower):
             score = 3
-        elif any(alias.lower().startswith(query) for alias in cmd.get("aliases", [])):
+        elif any(alias.lower().startswith(query) for alias in _get_command_aliases(cmd)):
             score = 4
         else:
             continue
@@ -217,9 +252,9 @@ def generate_command_suggestions(
                 SuggestionItem(
                     id=name,
                     display_text=format_command(name),
-                    description=cmd.get("description"),
-                    tag=cmd.get("kind"),
-                    metadata=cmd,
+                    description=_get_command_description(cmd),
+                    tag=_get_command_kind(cmd),
+                    metadata=_get_command_metadata(cmd),
                 ),
             )
         )
@@ -231,7 +266,7 @@ def generate_command_suggestions(
 
 def get_best_command_match(
     partial_command: str,
-    commands: list[dict] | None = None,
+    commands: list[CommandItem | dict] | None = None,
 ) -> tuple[str, str] | None:
     """
     Find the best matching command for a partial command.
@@ -244,9 +279,9 @@ def get_best_command_match(
 
     query = partial_command.lower()
     for cmd in commands:
-        if cmd.get("isHidden", False):
+        if _is_command_hidden(cmd):
             continue
-        name = get_command_name(cmd)
+        name = _get_command_name(cmd)
         if name.lower().startswith(query):
             suffix = name[len(partial_command):]
             return suffix, name
@@ -283,7 +318,7 @@ def find_slash_command_positions(
 
 def apply_command_suggestion(
     suggestion: SuggestionItem | str,
-    commands: list[dict],
+    commands: list[CommandItem | dict],
     on_input_change: Callable[[str], None],
     set_cursor_offset: Callable[[int], None],
     on_submit: Callable[[str], None] | None = None,
@@ -304,7 +339,7 @@ def apply_command_suggestion(
         metadata = suggestion.metadata
         if not isinstance(metadata, dict):
             return
-        command_name = get_command_name(metadata)
+        command_name = metadata.get("name", suggestion.id)
 
     new_input = format_command(command_name)
     on_input_change(new_input)

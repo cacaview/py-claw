@@ -24,6 +24,7 @@ from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import Header, RichLog
 
+from py_claw.ui.typeahead import CommandItem
 from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode
 from py_claw.ui.widgets.prompt_footer import PromptFooter
 from py_claw.ui.widgets.status_line import StatusLine
@@ -63,7 +64,7 @@ class REPLScreen(Vertical):
         on_clear: Callable[[], None] | None = None,
         on_model_change: Callable[[str], None] | None = None,
         suggestion_engine: Any = None,
-        command_items: list[dict] | None = None,
+        command_items: list[CommandItem] | None = None,
         *,
         id: str | None = None,
         classes: str | None = None,

@@ -7,7 +7,7 @@ from py_claw.cli.runtime import RuntimeState
 from py_claw.query import QueryRuntime
 from py_claw.schemas.common import SDKUserMessage
 from py_claw.ui.screens.repl import REPLScreen
-from py_claw.ui.typeahead import SuggestionEngine
+from py_claw.ui.typeahead import CommandItem, SuggestionEngine
 from py_claw.utils.suggestions.command_suggestions import (
     get_best_command_match,
     is_command_input,
@@ -22,24 +22,15 @@ class TuiRunResult:
 DEFAULT_PROMPT_HINT = "Type a prompt or /command"
 
 
-def _build_command_items(state: RuntimeState) -> list[dict[str, Any]]:
+def _build_command_items(state: RuntimeState) -> list[CommandItem]:
     registry = state.build_command_registry(settings_skills=None)
     commands = registry.slash_commands()
-    command_items: list[dict[str, Any]] = []
+    command_items: list[CommandItem] = []
     for command in commands:
         name = str(command.get("name", "")).strip()
         if not name:
             continue
-        command_items.append(
-            {
-                "name": name,
-                "description": str(command.get("description", "") or ""),
-                "kind": str(command.get("kind", "") or ""),
-                "argumentHint": str(command.get("argumentHint", "") or ""),
-                "isHidden": bool(command.get("isHidden", False)),
-                "aliases": list(command.get("aliases", []) or []),
-            }
-        )
+        command_items.append(CommandItem.from_dict(command))
     return command_items
 
 

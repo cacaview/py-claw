@@ -17,25 +17,16 @@
 | TUI-4 | 4 个 overlay dialog（Ctrl+R History / Ctrl+P Quick Open / Ctrl+M Model / Ctrl+T Tasks）+ overlay 状态追踪 | ✅ |
 | TUI-5 | State 化（TUIState + global store）、Layout 化（单一架构）、Vim mode（INSERT/NORMAL/VISUAL）、窄终端适配、pasted content、queue/stash prompt | ✅ |
 
-关键文件变化：
-- 新增 4 个 overlay dialog（`history_search`、`model_picker`、`quick_open`、`tasks_panel`）
-- 新增 `state/tui_state.py`（TUIState + store helpers）
-- 新增 `PromptFooter` widget、`HelpMenuDialog`
-- 删除 `REPLApp` 独立壳层，统一为 `PyClawApp`
-- `AppState` 新增 `tui: TUIState` 字段
+### P1 收尾与打磨
 
-### 其他已完成
-
-- `/insights` 多阶段分析 pipeline（Phase A-H 完整，数据源切至 session_storage）
-- bridge、remote、assistant、state 等子系统已确认与 TS 等效对齐
+- **CommandDefinition adapter 化** ✅ — `CommandItem` dataclass 替代 `dict`，整条链路（`SuggestionEngine` / `generate_command_suggestions` / `get_best_command_match` / `HelpMenuDialog` / `_build_command_items`）已迁移至类型安全写法
 
 ---
 
 ## 接下来可以做什么
 
-### P1 — TUI 收尾与打磨
+### P1 — 剩余收尾
 
-- **CommandDefinition adapter 化**：当前 `command_items` 用 dict，未来应收敛到正式 dataclass，提升类型安全
 - **Recent usage 排序**：命令 suggestions 尚未按历史使用频率排序，接入 session history usage score 后可实现
 - **Bridge/team/agent/task status pills**：Footer 右侧可增加状态图标（bridge 连接状态、agent 任务数等）
 
@@ -61,6 +52,6 @@
 
 ## 风险注意事项
 
-1. **不要再在 `todo.md` 里写"未实现清单"**：绝大多数高信号功能已对齐或等效，剩余差异是"能力深度"和"实现形态"问题，不是"有没有"
-2. **TUI 不要再走两套壳层**：现有 `PyClawApp` + `REPLScreen` 架构已收敛，继续在其内迭代
-3. **Textual 不等于 Ink/React**：TS 的 hook/context 模式不能直接翻译，要按 Textual 的 widget/message/reactive 模型重新建模
+1. **TUI 不要再走两套壳层**：现有 `PyClawApp` + `REPLScreen` 架构已收敛，继续在其内迭代
+2. **Textual 不等于 Ink/React**：TS 的 hook/context 模式不能直接翻译，要按 Textual 的 widget/message/reactive 模型重新建模
+3. **Python 测试注意编码**：Windows 下 pytest 可能遇到 GBK 解码问题，输出捕获时注意

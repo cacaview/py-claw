@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -39,6 +39,44 @@ class SuggestionType(str, Enum):
     PATH = "path"
     SHELL_HISTORY = "shell_history"
     MID_INPUT_SLASH = "mid_input_slash"
+
+
+@dataclass(slots=True, frozen=True)
+class CommandItem:
+    """Type-safe command item for the suggestion engine.
+
+    Replaces the dict-based command_items used previously.
+    """
+
+    name: str
+    description: str
+    argument_hint: str = ""
+    kind: str = ""  # "local" | "prompt"
+    is_hidden: bool = False
+    aliases: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> CommandItem:
+        """Construct from a dict (e.g. from CommandDefinition.to_slash_command())."""
+        return cls(
+            name=str(d.get("name", "")),
+            description=str(d.get("description", "") or ""),
+            argument_hint=str(d.get("argumentHint", "") or ""),
+            kind=str(d.get("kind", "") or ""),
+            is_hidden=bool(d.get("isHidden", False)),
+            aliases=tuple(d.get("aliases") or []) if d.get("aliases") else (),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert back to dict for compatibility with SuggestionItem.metadata."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "argumentHint": self.argument_hint,
+            "kind": self.kind,
+            "isHidden": self.is_hidden,
+            "aliases": list(self.aliases),
+        }
 
 
 @dataclass(slots=True)
@@ -91,13 +129,13 @@ class SuggestionEngine:
 
     def __init__(
         self,
-        command_items: list[dict] | None = None,
+        command_items: list[CommandItem] | None = None,
         max_results: int = 12,
     ) -> None:
-        self._command_items: list[dict] = list(command_items or [])
+        self._command_items: list[CommandItem] = list(command_items or [])
         self._max_results = max_results
 
-    def set_command_items(self, items: list[dict]) -> None:
+    def set_command_items(self, items: list[CommandItem]) -> None:
         """Update the command registry."""
         self._command_items = list(items)
 
@@ -223,8 +261,6 @@ class SuggestionEngine:
         """Generate slash command suggestions."""
         if has_command_args(text):
             return []
-
-        from py_claw.utils.suggestions.command_suggestions import SuggestionItem
 
         raw = generate_command_suggestions(text, self._command_items)
         return [

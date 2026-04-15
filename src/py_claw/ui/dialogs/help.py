@@ -12,7 +12,7 @@ Shows:
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from textual.app import ComposeResult
 from textual.containers import ScrollableContainer, Vertical
@@ -20,6 +20,24 @@ from textual.widgets import Static
 
 from py_claw.ui.theme import get_theme
 from py_claw.ui.widgets.dialog import Dialog
+
+
+def _cmd_name(cmd: Any) -> str:
+    return getattr(cmd, "name", "") or (cmd.get("name") if isinstance(cmd, dict) else "")
+
+
+def _cmd_description(cmd: Any) -> str:
+    return getattr(cmd, "description", "") or (cmd.get("description", "") if isinstance(cmd, dict) else "")
+
+
+def _cmd_argument_hint(cmd: Any) -> str:
+    return getattr(cmd, "argument_hint", "") or (cmd.get("argumentHint", "") if isinstance(cmd, dict) else "")
+
+
+def _cmd_is_hidden(cmd: Any) -> bool:
+    if hasattr(cmd, "is_hidden"):
+        return cmd.is_hidden
+    return bool(cmd.get("isHidden", False)) if isinstance(cmd, dict) else False
 
 
 class HelpMenuDialog(Dialog):
@@ -31,7 +49,7 @@ class HelpMenuDialog(Dialog):
 
     def __init__(
         self,
-        commands: list[dict] | None = None,
+        commands: list[Any] | None = None,
         shortcuts: dict[str, str] | None = None,
         on_close: Callable[[], None] | None = None,
         *,
@@ -52,7 +70,6 @@ class HelpMenuDialog(Dialog):
 
     def compose(self) -> ComposeResult:
         theme = get_theme()
-        text = theme.colors.get("text", "#ffffff")
         dim = theme.colors.get("text_dim", "#555555")
         accent = "yellow"
 
@@ -62,10 +79,10 @@ class HelpMenuDialog(Dialog):
         with ScrollableContainer(id="help-commands"):
             with Vertical():
                 for cmd in self._commands:
-                    name = cmd.get("name", "")
-                    desc = cmd.get("description", "")
-                    arg_hint = cmd.get("argumentHint", "")
-                    if not name or cmd.get("isHidden", False):
+                    name = _cmd_name(cmd)
+                    desc = _cmd_description(cmd)
+                    arg_hint = _cmd_argument_hint(cmd)
+                    if not name or _cmd_is_hidden(cmd):
                         continue
                     cmd_line = f"[{accent}]/{name}[/] "
                     if arg_hint:
@@ -78,8 +95,8 @@ class HelpMenuDialog(Dialog):
         yield Static("Keyboard Shortcuts", id="help-section-title-2")
 
         with Vertical(id="help-shortcuts"):
-            for action, desc in self._shortcuts.items():
-                yield Static(f"[dim]{action}[/dim]  {desc}")
+            for action, desc_text in self._shortcuts.items():
+                yield Static(f"[dim]{action}[/dim]  {desc_text}")
 
     def action_cancel(self) -> None:
         """Handle Escape — close the help dialog."""
