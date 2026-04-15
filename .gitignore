@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Project dirs
+.claude/
+.py_claw/
+src/.py_claw/
+
+# TypeScript reference tree (upstream alignment, not part of py-claw)
+ClaudeCode-main/
+
+# IDE / OS
+.ace-tool/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Image artifacts (from previous sessions)
+*.png
