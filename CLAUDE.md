@@ -144,7 +144,7 @@ graph TD
 | `src/py_claw/mcp` | Python | `runtime.py` | `tests/test_mcp_runtime.py` | settings 的 `mcp` 段 | 大部分完成 | MCP server 状态快照、stdio/SSE/WebSocket transport |
 | `src/py_claw/services` | Python | 各子模块 | 各子模块测试 | 各子模块配置 | 基本完成 | 运行时服务层（auth/api/log/debug/stats/bash/session_state/cron/cleanup/suggestions/compact/session_memory/oauth/lsp/agent/ide/doctor/model/permissions/telemetry/sandbox/secure_storage/deep_link/file_persistence/native_installer/powershell/remote/worktree） |
 | `src/py_claw/hooks` | Python | `schemas.py`, `runtime.py` | `tests/test_hooks_runtime.py` | settings 的 `hooks` 段 | 2/2 | Hook schema 与命令 hook 运行时 |
-| `src/py_claw/ui` | Python | `textual_app.py` | 手动 smoke test | textual>=0.50 | ✅ Phase 1-4 完成 | Textual 终端 UI 层（REPL 屏幕、设计系统组件） |
+| `src/py_claw/ui` | Python | `textual_app.py` | `tests/test_tui*/**`, `tests/test_tui_textual.py` | textual>=0.50 | ✅ Phase 1-5 完成 + compact layout + shortcut surface | Textual 终端 UI 层（REPL 屏幕、overlay/dialog、设计系统组件） |
 | `src/py_claw/ssh` | Python | `session.py` | 无独立测试 | 无独立配置 | 1/1 | SSH 会话管理 |
 | `src/py_claw/buddy` | Python | `companion.py`, `sprites.py`, `prompt.py` | 无独立测试 | 无独立配置 | 3/3 | Companion sprite 系统、确定性roll、ASCII渲染 |
 | `tests` | Python | `pytest` | 自身 | `tool.pytest.ini_options` | 6/6 | 协议与运行时行为回归 |
@@ -225,6 +225,10 @@ graph TD
 
 ## 变更记录 (Changelog)
 
+- 2026-04-16：主交互快捷键面补齐完成 — 统一 `services/keybindings/service.py` 的 shortcut source，help menu / status line / footer 不再各自漂移；新增 `PromptInput` `Shift+Tab` mode cycle，并补 `tests/test_tui/test_prompt_input.py`、`tests/test_tui/test_repl_screen.py`、`tests/test_tui/test_overlays.py` 回归覆盖（52 个测试通过）
+- 2026-04-16：窄屏 / 矮屏布局策略优化完成 — `textual_app.py` 不再在 `<80` / `<20` 时直接隐藏 `#pi-mode-bar` / `#repl-footer`；`REPLScreen` 统一分发 compact layout；`PromptInput` / `PromptFooter` 新增 `compact_mode` 并保留最小 mode/hint/suggestion/help 反馈；新增 responsive TUI 回归覆盖并刷新 `todo.md` 与 UI 文档
+- 2026-04-16：主 REPL overlay 覆盖面补齐 — 新增 `tests/test_tui/test_overlays.py`（18 个测试通过），覆盖 Help / History Search / Quick Open / Model Picker / TasksPanel 的打开、关闭、互斥与选择结果回填；补 `PromptDialog` / `PermissionDialog` 最小交互验证；同步刷新 `todo.md`、根 `CLAUDE.md` 与 `src/py_claw/ui/CLAUDE.md`
+- 2026-04-16：Prompt suggestion UX 收敛完成 — `PromptInput` 移除重复建议渲染，改由 `PromptFooter` 单一展示；`get_suggestions()` 补全 `AGENT`/`CHANNEL` 类型；`detect_type()` 修复 bare `#` 检测；PageUp 行为统一；新增 `tests/test_typeahead.py`（42 测试）
 - 2026-04-15：补齐 `services/bridge/poll_config.py` 的动态配置接入，bridge poll config 现已通过 analytics dynamic config 读取 `tengu_bridge_poll_interval_config`，不再始终回退默认值；对应测试已补齐。
 - 2026-04-15：继续深化轻量 handler，实现 `/remote-setup`（remote managed settings 状态/清缓存）、`/debug-tool-call`（diagnostic tracking 摘要）、`/issue`（gh CLI 只读 issue list/show）；同时完成新一轮递归对齐复扫，确认当前仅剩 `services/bridge/poll_config.py` 未接入真实 GrowthBook 刷新值这一项明确 runtime 缺口。
 - 2026-04-15：继续深化 `/install` 命令，接入 native installer service 与全局配置持久化；现支持真实安装状态查看、stable/latest 安装流程与 update channel 记录，并补充命令回归测试。

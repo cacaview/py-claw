@@ -12,14 +12,14 @@ ModelShortName = str
 ModelSetting = Optional[str] | Literal["opusplan", "sonnet", "haiku", "opus", "best"] | None
 
 # Default model strings
- Opus_46 = "claude-opus-4-6-20250514"
+OPUS_46 = Opus_46 = "claude-opus-4-6-20250514"
 SONNET_46 = "claude-sonnet-4-6-20250514"
 HAIKU_45 = "claude-haiku-4-5-20241022"
- Opus_45 = "claude-opus-4-5-20241022"
+OPUS_45 = Opus_45 = "claude-opus-4-5-20241022"
 SONNET_45 = "claude-sonnet-4-5-20241022"
 SONNET_40 = "claude-sonnet-4-0-20250514"
- Opus_41 = "claude-opus-4-1-20250514"
- Opus_40 = "claude-opus-4-0-20240219"
+OPUS_41 = Opus_41 = "claude-opus-4-1-20250514"
+OPUS_40 = Opus_40 = "claude-opus-4-0-20240219"
 HAIKU_35 = "claude-haiku-3-5-20241022"
 SONNET_37 = "claude-sonnet-3-7-20250514"
 SONNET_35 = "claude-sonnet-3-5-20241022"

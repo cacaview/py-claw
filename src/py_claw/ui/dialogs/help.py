@@ -48,6 +48,8 @@ class HelpMenuDialog(Dialog):
     Shows all commands with descriptions, shortcuts, and usage hints.
     """
 
+    can_focus = True
+
     def __init__(
         self,
         commands: list[Any] | None = None,
@@ -103,6 +105,7 @@ class HelpMenuDialog(Dialog):
         """Handle Escape — close the help dialog."""
         if self._on_close:
             self._on_close()
+        self.remove()
 
 
 # Default shortcuts displayed in the help menu (derived from keybindings service)

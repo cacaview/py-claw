@@ -16,18 +16,24 @@ from __future__ import annotations
 
 import os
 from typing import TYPE_CHECKING, Any, Callable
+from datetime import datetime
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
 
 from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import Header, RichLog
+from textual.widgets import Header
 
+from py_claw.services.keybindings import (
+    get_footer_shortcuts_hint,
+    get_status_shortcuts_hint,
+)
 from py_claw.ui.typeahead import CommandItem
 from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode
 from py_claw.ui.widgets.prompt_footer import PromptFooter
 from py_claw.ui.widgets.status_line import StatusLine
+from py_claw.ui.widgets.messages import MessageList, MessageItem, MessageRole
 
 
 class REPLScreen(Vertical):
@@ -71,7 +77,7 @@ class REPLScreen(Vertical):
     ) -> None:
         self._model = model or "claude-sonnet-4-20250514"
         self._status = status
-        self._shortcuts = shortcuts or "?: help · Tab: complete"
+        self._shortcuts = shortcuts or get_status_shortcuts_hint()
         self._prompt_hint = prompt_hint
         self._on_submit = on_submit
         self._on_interrupt = on_interrupt
@@ -82,6 +88,7 @@ class REPLScreen(Vertical):
         self._command_items = list(command_items) if command_items else []
         self._is_loading = False
         self._current_mode = "normal"
+        self._compact_mode = "full"
         # Overlay tracking
         self._active_overlay: str | None = None
         self._overlay_ids: set[str] = set()
@@ -98,11 +105,8 @@ class REPLScreen(Vertical):
             id="repl-status",
         )
 
-        yield RichLog(
+        yield MessageList(
             id="repl-message-log",
-            highlight=False,
-            markup=True,
-            auto_scroll=True,
         )
 
         yield PromptInput(
@@ -114,13 +118,15 @@ class REPLScreen(Vertical):
             on_interrupt=self._on_interrupt,
             on_change=self._on_input_change,
             suggestion_engine=self._engine,
+            compact_mode=self._compact_mode,
             id="repl-prompt-input",
         )
 
         # Contextual footer: mode indicator + contextual hints + help shortcut
         yield PromptFooter(
-            shortcuts="?: help · Ctrl+R: history · Ctrl+P: files · Ctrl+M: model · Ctrl+T: tasks",
+            shortcuts=get_footer_shortcuts_hint(),
             id="repl-footer",
+            classes="compact-footer",
         )
 
     # ── overlay management ─────────────────────────────────────────────────────
@@ -268,32 +274,50 @@ class REPLScreen(Vertical):
 
     # ── message handling ───────────────────────────────────────────────────────
 
+    def on_prompt_input_help_toggled(self, event: PromptInput.HelpToggled) -> None:
+        """Open the help overlay from the prompt input help toggle."""
+        event.stop()
+        if self._is_overlay_active:
+            return
+        self._show_help_menu()
+
+    def on_prompt_input_prompt_mode_changed(self, event: PromptInput.PromptModeChanged) -> None:
+        """Sync prompt mode changes into the footer and TUI store."""
+        event.stop()
+        mode = event.mode.value
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.set_mode("bypass" if mode == "bypass_permissions" else mode)
+        try:
+            from py_claw.state.tui_state import update_tui_prompt_mode
+            update_tui_prompt_mode("bypass" if mode == "bypass_permissions" else mode)
+        except Exception:
+            pass
+
+    def on_prompt_input_vim_mode_changed(self, event: PromptInput.VimModeChanged) -> None:
+        """Sync vim mode changes into the shared TUI store."""
+        event.stop()
+        try:
+            from py_claw.state.tui_state import update_tui_vim_mode
+            update_tui_vim_mode(event.mode.value)
+        except Exception:
+            pass
+
+    def on_prompt_input_suggestions_changed(self, event: PromptInput.SuggestionsChanged) -> None:
+        """Sync prompt input suggestion payload into the footer."""
+        event.stop()
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.set_suggestions(event.items, event.selected_index)
+
+    def on_prompt_input_suggestion_index_changed(self, event: PromptInput.SuggestionIndexChanged) -> None:
+        """Sync prompt input suggestion selection into the footer."""
+        event.stop()
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.selected_index = event.index
+
     def on_message(self, event: object) -> None:
         """Handle messages from child widgets and overlays."""
         if hasattr(event, '__class__'):
             cls_name = event.__class__.__qualname__
-
-            # Help menu toggle from PromptInput
-            if cls_name == 'PromptInput.HelpToggled':
-                event.stop()
-                self._show_help_menu()
-                return
-
-            # Vim mode changed
-            if cls_name == 'PromptInput.VimModeChanged':
-                event.stop()
-                # Update footer to show new vim mode
-                from py_claw.state.tui_state import update_tui_vim_mode
-                mode = event.mode.value  # type: ignore[attr-defined]
-                update_tui_vim_mode(mode)
-                return
-
-            # Suggestion index changed (arrow navigation)
-            if cls_name == 'PromptInput.SuggestionIndexChanged':
-                event.stop()
-                footer = self.query_one("#repl-footer", PromptFooter)
-                footer.selected_index = event.index  # type: ignore[attr-defined]
-                return
 
             # History search result
             if cls_name == 'HistorySearchDialog.Selected':
@@ -361,7 +385,26 @@ class REPLScreen(Vertical):
         self.app.mount(dialog)
         dialog.focus()
 
+    def _prompt_mode_from_name(self, mode: str) -> PromptMode:
+        """Map external mode strings onto PromptMode values."""
+        mode_map = {
+            "normal": PromptMode.NORMAL,
+            "plan": PromptMode.PLAN,
+            "auto": PromptMode.AUTO,
+            "bypass": PromptMode.BYPASS_PERMISSIONS,
+            "bypass_permissions": PromptMode.BYPASS_PERMISSIONS,
+        }
+        return mode_map.get(mode, PromptMode.NORMAL)
+
     # ── public API ─────────────────────────────────────────────────────────────
+
+    def set_compact_mode(self, mode: str) -> None:
+        """Apply compact layout mode to prompt and footer widgets."""
+        self._compact_mode = mode
+        prompt = self.query_one("#repl-prompt-input", PromptInput)
+        footer = self.query_one("#repl-footer", PromptFooter)
+        prompt.set_compact_mode(mode)
+        footer.set_compact_mode(mode)
 
     def append_message(self, role: str, content: str, timestamp: str | None = None) -> None:
         """Append a message to the log.
@@ -371,31 +414,57 @@ class REPLScreen(Vertical):
             content: Message content
             timestamp: Optional timestamp string
         """
-        log = self.query_one("#repl-message-log", RichLog)
+        log = self.query_one("#repl-message-log", MessageList)
 
-        role_colors = {
-            "user": "#3b82f6",
-            "assistant": "#22c55e",
-            "system": "#f59e0b",
-            "tool": "#06b6d4",
-        }
-        color = role_colors.get(role.lower(), "#ffffff")
+        msg_role = MessageRole.USER
+        role_lower = role.lower()
+        if role_lower == "assistant":
+            msg_role = MessageRole.ASSISTANT
+        elif role_lower == "system":
+            msg_role = MessageRole.SYSTEM
+        elif role_lower == "tool":
+            msg_role = MessageRole.TOOL
 
-        prefix = f"[{color}]{role.upper()}[/{color}]"
+        ts = None
         if timestamp:
-            prefix += f" [dim]{timestamp}[/dim]"
+            # We don't parse the timestamp right now, just ignore or put current time.
+            ts = datetime.now()
 
-        log.write(f"{prefix}: {content}")
+        item = MessageItem(role=msg_role, content=content, timestamp=ts)
+        log.add_message(item)
+
+    def update_last_message(self, content: str, append: bool = False) -> None:
+        """Update or append to the last message in the log.
+        
+        Args:
+            content: Text to append or replace with.
+            append: If True, append to existing text.
+        """
+        try:
+            log = self.query_one("#repl-message-log", MessageList)
+            log.update_last_message(content, append)
+        except Exception:
+            pass
 
     def append_tool_progress(self, tool_name: str, elapsed: float) -> None:
         """Append tool progress message."""
-        log = self.query_one("#repl-message-log", RichLog)
-        log.write(f"[dim]└─ Tool '{tool_name}' completed in {elapsed:.2f}s[/dim]")
+        log = self.query_one("#repl-message-log", MessageList)
+        item = MessageItem(
+            role=MessageRole.TOOL, 
+            content=f"Tool '{tool_name}' completed in {elapsed:.2f}s",
+            tool_name=tool_name,
+            status="complete"
+        )
+        log.add_message(item)
 
     def append_error(self, error: str) -> None:
         """Append error message."""
-        log = self.query_one("#repl-message-log", RichLog)
-        log.write(f"[red]Error: {error}[/red]")
+        log = self.query_one("#repl-message-log", MessageList)
+        item = MessageItem(
+            role=MessageRole.SYSTEM, 
+            content=f"Error: {error}"
+        )
+        log.add_message(item)
 
     def set_status(self, status: str) -> None:
         """Update the status line and footer."""
@@ -447,12 +516,14 @@ class REPLScreen(Vertical):
         self.query_one("#repl-prompt-input", PromptInput).hint = hint
 
     def set_suggestion_items(self, items: list[object]) -> None:
-        """Update the prompt input suggestion items and footer."""
+        """Update the suggestion display in the footer (single source of truth).
+
+        Note: PromptInput still holds suggestion_items/selected_index for navigation
+        state tracking, but the actual suggestion rendering is handled by PromptFooter.
+        """
         prompt = self.query_one("#repl-prompt-input", PromptInput)
         prompt.set_suggestion_items(items)
         footer = self.query_one("#repl-footer", PromptFooter)
-        # Sync selected_index from prompt to footer
-        footer.selected_index = prompt.selected_index
         footer.set_suggestions(items, prompt.selected_index)
         # Publish to global store
         try:
@@ -465,7 +536,7 @@ class REPLScreen(Vertical):
         """Update the current mode (normal/plan/auto/bypass)."""
         self._current_mode = mode
         prompt = self.query_one("#repl-prompt-input", PromptInput)
-        prompt.prompt_mode = PromptMode(mode)
+        prompt.prompt_mode = self._prompt_mode_from_name(mode)
         footer = self.query_one("#repl-footer", PromptFooter)
         footer.set_mode(mode)
         # Publish to global store
@@ -477,8 +548,8 @@ class REPLScreen(Vertical):
 
     def clear_log(self) -> None:
         """Clear the message log."""
-        log = self.query_one("#repl-message-log", RichLog)
-        log.clear()
+        log = self.query_one("#repl-message-log", MessageList)
+        log.clear_messages()
 
     def focus_prompt(self) -> None:
         """Focus the prompt input."""
@@ -491,5 +562,9 @@ class REPLScreen(Vertical):
     def get_prompt_value(self) -> str:
         """Return the current prompt input value."""
         return self.query_one("#repl-prompt-input", PromptInput).get_value()
+
+    def get_suggestion_items(self) -> list[object]:
+        """Return the current prompt suggestion items."""
+        return list(self.query_one("#repl-prompt-input", PromptInput).suggestion_items)
 
 

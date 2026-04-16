@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import time
 from typing import Any
 
 from py_claw.cli.runtime import RuntimeState
 from py_claw.query import QueryRuntime
 from py_claw.schemas.common import SDKUserMessage
 from py_claw.ui.screens.repl import REPLScreen
-from py_claw.ui.typeahead import CommandItem, SuggestionEngine
+from py_claw.ui.typeahead import CommandItem, Suggestion, SuggestionEngine, SuggestionType
 from py_claw.utils.suggestions.command_suggestions import (
     get_best_command_match,
     is_command_input,
@@ -20,6 +21,17 @@ class TuiRunResult:
 
 
 DEFAULT_PROMPT_HINT = "Type a prompt or /command"
+
+
+def _prompt_suggestion_item(suggestion: str) -> Suggestion:
+    return Suggestion(
+        type=SuggestionType.PROMPT,
+        id="prompt-suggestion",
+        display_text=suggestion,
+        description="next prompt suggestion",
+        tag="prompt",
+        metadata={"source": "prompt_suggestion", "created_at": int(time() * 1000)},
+    )
 
 
 def _build_command_items(state: RuntimeState) -> list[CommandItem]:
@@ -111,30 +123,26 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         }
 
         /* Narrow terminal adaptations (applied via add_class) */
-        Screen.narrow ReplScreen {
-            /* Condensed spacing for narrow terminals */
-        }
         Screen.narrow #repl-message-log {
             height: 1fr;
+            max-height: 65%;
         }
-        Screen.narrow #pi-mode-bar {
-            height: 0;
-            display: none;
+        Screen.narrow #repl-prompt-input {
+            margin: 0;
         }
         Screen.narrow #repl-footer {
-            display: none;
+            display: block;
         }
 
         /* Short terminal adaptations (height < 20 rows) */
-        Screen.short ReplScreen {
-            /* Minimal footer for short terminals */
+        Screen.short #repl-message-log {
+            max-height: 55%;
+        }
+        Screen.short #repl-prompt-input {
+            margin: 0;
         }
         Screen.short #repl-footer {
-            display: none;
-        }
-        Screen.short #pi-mode-bar {
-            height: 0;
-            display: none;
+            display: block;
         }
         """
 
@@ -162,6 +170,8 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             )
 
         def on_mount(self) -> None:
+            state.permission_ask_callback = self._handle_permission_ask
+            state.ask_user_callback = self._handle_prompt_ask
             self._focus_prompt()
             self._update_narrow_mode()
             if prompt:
@@ -175,14 +185,31 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             """Apply or remove narrow/short terminal class based on dimensions."""
             width = self.size.width
             height = self.size.height
-            if width < 80:
+            is_narrow = width < 80
+            is_short = height < 20
+            if is_narrow:
                 self.screen.add_class("narrow")
             else:
                 self.screen.remove_class("narrow")
-            if height < 20:
+            if is_short:
                 self.screen.add_class("short")
             else:
                 self.screen.remove_class("short")
+
+            compact_mode = "full"
+            if is_narrow and is_short:
+                compact_mode = "tight"
+            elif is_short:
+                compact_mode = "short"
+            elif is_narrow:
+                compact_mode = "narrow"
+            self._screen().set_compact_mode(compact_mode)
+
+            try:
+                from py_claw.state.tui_state import set_narrow_terminal
+                set_narrow_terminal(is_narrow)
+            except Exception:
+                pass
 
         def _screen(self) -> REPLScreen:
             return self.query_one(REPLScreen)
@@ -192,6 +219,9 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
 
         def _append_message(self, role: str, text: str) -> None:
             self._screen().append_message(role, text)
+
+        def _update_last_message(self, text: str, append: bool = False) -> None:
+            self._screen().update_last_message(text, append)
 
         def _append_tool_progress(self, tool_name: str, elapsed: float) -> None:
             self._screen().append_tool_progress(tool_name, elapsed)
@@ -205,12 +235,99 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         def _set_suggestions(self, items: list[object]) -> None:
             self._screen().set_suggestion_items(items)
 
+        def _set_prompt_suggestion(self, suggestion: str | None) -> None:
+            items = [_prompt_suggestion_item(suggestion)] if suggestion else []
+            self._set_suggestions(items)
+
+        def _clear_prompt_suggestions(self) -> None:
+            prompt = self._screen().get_prompt_value().strip()
+            if prompt:
+                return
+            current = self._screen().get_suggestion_items()
+            if any(getattr(item, "type", None) == SuggestionType.PROMPT for item in current):
+                self._set_suggestions([])
+
         def _submit_prompt(self, text: str) -> None:
             self._screen().set_prompt_value(text)
             self._handle_submit(text)
 
+        def _handle_prompt_ask(self, arguments: Any) -> tuple[str, dict[str, Any] | None]:
+            import threading
+            result_box: list[tuple[str, dict[str, Any] | None]] = []
+            event = threading.Event()
+            
+            def handle_accept(answers: dict[str, str], annotations: dict) -> None:
+                result_box.append(("accept", {"answers": answers, "annotations": annotations}))
+                self._screen()._unregister_overlay("prompt-dialog")
+                dialog.remove()
+                event.set()
+                
+            def handle_decline() -> None:
+                result_box.append(("decline", None))
+                self._screen()._unregister_overlay("prompt-dialog")
+                dialog.remove()
+                event.set()
+
+            from py_claw.ui.dialogs.prompt import PromptDialog
+            
+            dialog = PromptDialog(
+                arguments=arguments,
+                on_accept=handle_accept,
+                on_decline=handle_decline,
+                id="overlay-prompt"
+            )
+            
+            def mount_dialog() -> None:
+                self._screen()._register_overlay("prompt-dialog")
+                self._screen().mount(dialog)
+                dialog.focus()
+            
+            self.call_from_thread(mount_dialog)
+            event.wait()
+            return result_box[0]
+
+        def _handle_permission_ask(self, tool_use_id: str, tool_name: str, tool_input: dict[str, Any], content: str | None) -> tuple[str, dict[str, Any] | None, str | None]:
+            import threading
+            
+            result_box: list[tuple[str, dict[str, Any] | None, str | None]] = []
+            event = threading.Event()
+            
+            def handle_allow() -> None:
+                result_box.append(("allow", None, None))
+                self._screen()._unregister_overlay("permission-dialog")
+                dialog.remove()
+                event.set()
+                
+            def handle_deny() -> None:
+                result_box.append(("deny", None, "User denied permission"))
+                self._screen()._unregister_overlay("permission-dialog")
+                dialog.remove()
+                event.set()
+
+            from py_claw.ui.dialogs.permission import PermissionDialog
+            
+            dialog = PermissionDialog(
+                tool_name=tool_name,
+                message=content or f"{tool_name} requires permission",
+                params=tool_input,
+                on_allow=handle_allow,
+                on_deny=handle_deny,
+                id="overlay-permission",
+            )
+            
+            def mount_dialog() -> None:
+                self._screen()._register_overlay("permission-dialog")
+                self._screen().mount(dialog)
+                dialog.focus()
+            
+            self.call_from_thread(mount_dialog)
+            event.wait()
+            return result_box[0]
+
         def _handle_input_change(self, text: str) -> None:
             self._set_hint(_format_prompt_hint(text, engine))
+            if text.strip():
+                self._clear_prompt_suggestions()
             # Compute suggestions via unified engine and update list
             items = engine.get_suggestions(text, len(text))
             self._set_suggestions(items)
@@ -240,7 +357,7 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                 if output_type == "stream_event":
                     event = getattr(output, "event", None)
                     if getattr(event, "type", None) == "stream_request_start":
-                        self.call_from_thread(self._append_message, "assistant", "thinking")
+                        self.call_from_thread(self._append_message, "assistant", "thinking...")
                     continue
                 if output_type == "tool_progress":
                     self.call_from_thread(
@@ -249,6 +366,9 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                         output.elapsed_time_seconds,
                     )
                     continue
+                if output_type == "prompt_suggestion":
+                    self.call_from_thread(self._set_prompt_suggestion, str(output.suggestion))
+                    continue
                 if output_type == "result":
                     payload = output.model_dump(by_alias=True, exclude_none=True)
                     if payload.get("subtype") == "error_during_execution" and payload.get("errors"):
@@ -256,7 +376,7 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                     else:
                         result_text = payload.get("result")
                         if result_text:
-                            self.call_from_thread(self._append_message, "assistant", str(result_text))
+                            self.call_from_thread(self._update_last_message, str(result_text))
 
             self.call_from_thread(self._set_status, "idle")
             self.call_from_thread(self._set_hint, DEFAULT_PROMPT_HINT)
@@ -266,6 +386,7 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             value = text.strip()
             if not value:
                 return
+            self._set_suggestions([])
             self._set_status("running")
             self._append_message("user", value)
             self._run_prompt(value)
@@ -279,7 +400,54 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             self._set_hint(f"Model: {model}")
 
         def action_quit(self) -> None:
-            self.exit()
+            if state.active_worktree_session:
+                from py_claw.ui.dialogs.worktree import WorktreeExitDialog
+                
+                wt = state.active_worktree_session
+                dialog: WorktreeExitDialog | None = None
+                
+                def on_keep() -> None:
+                    if dialog:
+                        dialog.remove()
+                    self.exit()
+                    
+                def on_remove() -> None:
+                    if dialog:
+                        dialog.remove()
+                    try:
+                        from py_claw.services.worktree import remove_agent_worktree
+                        remove_agent_worktree(
+                            worktree_path=wt.worktree_path,
+                            worktree_branch=wt.worktree_branch,
+                            git_root=wt.repo_root or wt.original_cwd,
+                            hook_based=(wt.backend == "hook"),
+                        )
+                    except Exception:
+                        pass
+                    self.exit()
+
+                def on_cancel() -> None:
+                    if dialog:
+                        dialog.remove()
+                    self._screen()._unregister_overlay("exit-dialog")
+                    self._screen().focus_prompt()
+                
+                dialog = WorktreeExitDialog(
+                    worktree_path=wt.worktree_path,
+                    worktree_branch=wt.worktree_branch or "unknown",
+                    has_changes=False,
+                    commit_count=0,
+                    tmux_session_name=None,
+                    on_keep=on_keep,
+                    on_remove=on_remove,
+                    on_cancel=on_cancel,
+                    id="overlay-exit"
+                )
+                self._screen()._register_overlay("exit-dialog")
+                self._screen().mount(dialog)
+                dialog.focus()
+            else:
+                self.exit()
 
         def action_new_session(self) -> None:
             screen = self._screen()
@@ -292,16 +460,16 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             self._screen().clear_log()
 
         def action_show_history_search(self) -> None:
-            self._screen()._show_history_search()
+            self._screen().action_show_history_search()
 
         def action_show_quick_open(self) -> None:
-            self._screen()._show_quick_open()
+            self._screen().action_show_quick_open()
 
         def action_show_model_picker(self) -> None:
-            self._screen()._show_model_picker()
+            self._screen().action_show_model_picker()
 
         def action_show_tasks_panel(self) -> None:
-            self._screen()._show_tasks_panel()
+            self._screen().action_show_tasks_panel()
 
     PyClawApp().run()
     return 0

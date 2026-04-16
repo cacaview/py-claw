@@ -33,6 +33,7 @@ class BackendTurnResult:
     duration_api_ms: float = 0.0
     total_cost_usd: float = 0.0
     tool_calls: list[BackendToolCall] = field(default_factory=list)
+    prompt_suggestion: str | None = None
 
 
 class QueryBackend(Protocol):
@@ -133,6 +134,7 @@ def _build_backend_result(
     total_cost_usd: float = 0.0,
     stop_reason: str = "end_turn",
     tool_calls: list[BackendToolCall] | None = None,
+    prompt_suggestion: str | None = None,
 ) -> BackendTurnResult:
     return BackendTurnResult(
         assistant_text=assistant_text,
@@ -141,6 +143,7 @@ def _build_backend_result(
         model_usage=_build_model_usage(prepared=prepared, assistant_text=assistant_text, total_cost_usd=total_cost_usd),
         total_cost_usd=total_cost_usd,
         tool_calls=list(tool_calls or []),
+        prompt_suggestion=prompt_suggestion,
     )
 
 
@@ -300,6 +303,7 @@ def _parse_sdk_response(payload: object, *, prepared: PreparedTurn, sdk_url: str
         duration_api_ms=duration_api_ms,
         total_cost_usd=total_cost_usd,
         tool_calls=_tool_call_field(response),
+        prompt_suggestion=_string_field(response, "prompt_suggestion", "promptSuggestion") or None,
     )
 
 
@@ -332,6 +336,18 @@ def _sdk_backend_request(prepared: PreparedTurn, context: QueryTurnContext, sdk_
     return _parse_sdk_response(payload, prepared=prepared, sdk_url=sdk_url)
 
 
+def _placeholder_prompt_suggestion(prepared: PreparedTurn) -> str | None:
+    if not prepared.prompt_suggestions or not prepared.query_text:
+        return None
+    prompt = prepared.query_text.strip()
+    if not prompt:
+        return None
+    compact = " ".join(prompt.split())
+    if len(compact) > 120:
+        compact = compact[:117].rstrip() + "..."
+    return f"Continue from: {compact}"
+
+
 class PlaceholderQueryBackend:
     def run_turn(self, prepared: PreparedTurn, context: QueryTurnContext) -> BackendTurnResult:
         _logger.warning(
@@ -343,6 +359,7 @@ class PlaceholderQueryBackend:
             prepared=prepared,
             assistant_text=assistant_text,
             backend_type="placeholder",
+            prompt_suggestion=_placeholder_prompt_suggestion(prepared),
         )
 
 
@@ -448,6 +465,7 @@ class AnthropicQueryBackend:
             duration_api_ms=elapsed_ms,
             total_cost_usd=0.0,
             tool_calls=tool_calls,
+            prompt_suggestion=None,
         )
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 import os
 import threading
 
@@ -68,6 +68,8 @@ class RuntimeState:
     mcp_runtime: McpRuntime = field(default_factory=McpRuntime)
     active_worktree_session: ActiveWorktreeSession | None = None
     advisor_model: str | None = None
+    permission_ask_callback: Callable[[str, str, dict[str, Any], str | None], tuple[str, dict[str, Any] | None, str | None]] | None = None
+    ask_user_callback: Callable[[Any], tuple[str, dict[str, Any] | None]] | None = None
 
     def __post_init__(self) -> None:
         if self.tool_runtime is None:

@@ -291,6 +291,23 @@ def append_to_session(entry: dict[str, Any]) -> None:
     get_session_storage_engine().append_entry(entry)
 
 
+async def flush_session_storage() -> None:
+    """Flush pending session storage writes.
+
+    The current Python implementation writes transcript entries synchronously,
+    so there is no buffered async writer to drain. This function exists to keep
+    parity with callers that expect a best-effort awaitable flush hook.
+    """
+    session_file = get_session_storage_engine().get_session_file()
+    if not session_file:
+        return
+    try:
+        Path(session_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(session_file).touch(exist_ok=True)
+    except OSError:
+        pass
+
+
 async def extract_current_session_metadata() -> SessionMetadata | None:
     """Extract metadata from the current session file.
 

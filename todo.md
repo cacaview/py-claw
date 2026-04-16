@@ -1,54 +1,78 @@
 # TODO — py-claw 工作进度
 
-> 更新日期：2026-04-15
+> 更新日期：2026-04-16
 
 ---
 
 ## TUI 对齐任务（按步骤拆分）
 
-### 1. Prompt suggestion UX 收敛与对齐
+### 1. Prompt suggestion UX 收敛与对齐 ✅
 
-1. 审计 `PromptInput` 与 `PromptFooter` 的建议展示职责，确定单一展示面
-2. 删除重复建议渲染，只保留一套 slash/path/history/agent/channel 建议 UI
-3. 统一建议列表的滚动窗口、选中态、分页策略与可见性规则
-4. 核对并补齐 `↑↓ / PageUp / PageDown / Tab / Esc` 的行为一致性
-5. 对齐空输入 `/`、部分命令、mid-input slash、path、shell history 的展示策略
-6. 处理窄终端和矮终端下的建议列表退化方案
-7. 补充 Prompt suggestion 交互测试或最小 smoke 脚本
+1. ✅ 审计 `PromptInput` 与 `PromptFooter` 的建议展示职责，确定单一展示面
+2. ✅ 删除重复建议渲染，只保留 PromptFooter 作为单一展示面
+3. ✅ 统一建议列表的滚动窗口、选中态、分页策略与可见性规则
+4. ✅ 统一 `↑↓ / PageUp / PageDown / Tab / Esc` 的行为一致性（PageUp 不再 wrap）
+5. ✅ 对齐空输入 `/`、部分命令、mid-input slash、path、shell history 的展示策略
+6. ✅ 处理窄终端和矮终端下的建议列表退化方案
+7. ✅ 补充 Prompt suggestion 交互测试（`tests/test_typeahead.py`，42 个测试全部通过）
 
-### 2. REPL 主消息区升级为专用消息列表
+**Bug 修复**：
 
-1. 审计现有 `RichLog` 用法与仓内可复用的消息列表/虚拟列表组件
-2. 确定 Python 侧主 REPL 消息区替换方案（复用现有组件或补一个专用适配层）
-3. 将 `src/py_claw/ui/screens/repl.py` 从 `RichLog` 切换到结构化消息列表
-4. 对齐用户/助手/系统/tool/progress 消息的样式与分组展示
-5. 验证长会话下的滚动、自动定位、性能与可读性
-6. 补充主消息区渲染与交互测试
+- 修复 `get_suggestions()` 缺少 `AGENT`、`CHANNEL` 类型处理
+- 修复 `_get_channel_suggestions()` 和 `_get_agent_suggestions()` 对 bare `#`/`@` 的处理（`group(2)` 可能为 `None`）
+- 修复 `detect_type()` 对 bare `#` 的检测（正则改为 `?` 可选）
 
-### 3. 主 REPL overlay 覆盖面补齐
+### 2. REPL 主消息区升级为专用消息列表 ✅
 
-1. 对照 TS `REPL.tsx` 盘点已存在但未接线的 Python dialog / overlay
-2. 区分必须接入主 REPL 的高优先级交互面与可后置项
-3. 先补主流程相关 overlay：permission / hook prompt / MCP elicitation / exit flow
-4. 再补体验增强类 overlay：idle/cost/remote/IDE onboarding/LSP-plugin recommendation 等
-5. 为每个新增 overlay 补入口、关闭回路、焦点恢复与状态同步
-6. 补充 overlay 交互测试与主流程 smoke test
+1. ✅ 审计现有 `RichLog` 用法与仓内可复用的消息列表/虚拟列表组件
+2. ✅ 确定 Python 侧主 REPL 消息区替换方案（复用现有组件或补一个专用适配层）
+3. ✅ 将 `src/py_claw/ui/screens/repl.py` 从 `RichLog` 切换到结构化消息列表
+4. ✅ 对齐用户/助手/系统/tool/progress 消息的样式与分组展示
+5. ✅ 验证长会话下的滚动、自动定位、性能与可读性
+6. ✅ 补充主消息区渲染与交互测试
 
-### 4. 窄屏 / 矮屏布局策略优化
+### 3. 主 REPL overlay 覆盖面补齐 ✅
 
-1. 盘点当前 `<80` 宽与 `<20` 高时被直接隐藏的 UI 元素
-2. 重新设计窄屏降级顺序，优先压缩而不是直接隐藏关键状态信息
-3. 保留最小可用的 mode / hint / suggestion / help 信息
-4. 为短终端设计独立的 footer / prompt 紧凑布局
-5. 手动验证 80 列以下、20 行以下的可用性与信息密度
+1. ✅ 对照 TS `REPL.tsx` 盘点已存在但未接线的 Python dialog / overlay
+2. ✅ 区分必须接入主 REPL 的高优先级交互面与可后置项
+3. ✅ 先补主流程相关 overlay：permission / hook prompt / MCP elicitation / exit flow
+4. ✅ 补齐当前主 REPL 已接线 overlay 的自动化覆盖：help / history / quick-open / model picker / tasks
+5. ✅ 为主 REPL overlay 补入口、关闭回路、互斥状态与选择结果回填验证
+6. ✅ 新增 `tests/test_tui/test_overlays.py`（18 个测试通过），并补 `PromptDialog` / `PermissionDialog` 最小交互验证
+7. 后续体验增强类 overlay：idle/cost/remote/IDE onboarding/LSP-plugin recommendation 等继续排在下一轮
 
-### 5. 主交互快捷键面补齐
+### 4. 窄屏 / 矮屏布局策略优化 ✅
 
-1. 对照 TS REPL 梳理真正影响主流程的全局快捷键与模式切换入口
-2. 标记 Python 已具备、缺失、或仅部分对齐的键位
-3. 优先补主流程键位：帮助、导航、模式切换、overlay 入口、消息区交互
-4. 统一 help 文案、状态栏提示、实际绑定三者一致性
-5. 补充快捷键回归测试或最小交互 smoke case
+1. ✅ 盘点当前 `<80` 宽与 `<20` 高时被直接隐藏的 UI 元素
+2. ✅ 重新设计窄屏降级顺序，优先压缩而不是直接隐藏关键状态信息
+3. ✅ 保留最小可用的 mode / hint / suggestion / help 信息
+4. ✅ 为短终端设计独立的 footer / prompt 紧凑布局
+5. ✅ 手动验证 80 列以下、20 行以下的可用性与信息密度
+
+**本轮实现**：
+
+- `textual_app.py` 不再在 `<80` / `<20` 时直接隐藏 `#pi-mode-bar` 与 `#repl-footer`
+- `REPLScreen` 新增 compact layout 分发，统一驱动 `PromptInput` / `PromptFooter`
+- `PromptInput` 新增 `compact_mode`，在窄/矮屏下缩短 model/mode/hint 文案并压缩 padding
+- `PromptFooter` 新增 `compact_mode` + suggestion viewport 降级：`full` / `narrow` / `short` / `tight`
+- `tight` 模式下隐藏 help row 与 pills，但保留最小 suggestion/status 反馈
+- 新增 responsive 回归覆盖，验证 `<80`、`<20` 与 `<80 && <20` 三种布局约束
+
+### 5. 主交互快捷键面补齐 ✅
+
+1. ✅ 对照 TS REPL 梳理真正影响主流程的全局快捷键与模式切换入口
+2. ✅ 标记 Python 已具备、缺失、或仅部分对齐的键位
+3. ✅ 优先补主流程键位：帮助、导航、模式切换、overlay 入口、消息区交互
+4. ✅ 统一 help 文案、状态栏提示、实际绑定三者一致性
+5. ✅ 补充快捷键回归测试或最小交互 smoke case
+
+**本轮实现**：
+
+- `services/keybindings/service.py` 新增统一 shortcut source：help menu、status line、footer hint 共用同一套高频键位文案
+- `PromptInput` 新增 `Shift+Tab` mode cycle，按 `normal → plan → auto → bypass → normal` 循环，并通过消息同步 footer / TUI store
+- `REPLScreen` 改为复用 centralized status/footer shortcut hints，避免 `BINDINGS`、help、提示面各自漂移
+- Help surface 现明确展示 `shift+tab`、`ctrl+g/l/r/p/m/t`、`?`、`enter/esc/tab/↑↓/→` 等当前真实主流程键位
+- 新增 TUI 回归覆盖：模式循环、status/footer hint 对齐、help shortcut surface 对齐
 
 ### 6. Speculation / pipelined suggestions 接入
 

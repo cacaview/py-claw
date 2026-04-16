@@ -52,6 +52,9 @@ class PromptFooter(Static):
     PromptFooter {
         height: auto;
     }
+    PromptFooter #pf-top-row {
+        height: 1;
+    }
     PromptFooter #pf-mode-indicator {
         height: 1;
         padding: 0 1;
@@ -78,6 +81,23 @@ class PromptFooter(Static):
         padding: 0 1;
         color: $text-muted;
     }
+    PromptFooter.compact #pf-mode-indicator,
+    PromptFooter.compact #pf-hint,
+    PromptFooter.compact #pf-pills-row,
+    PromptFooter.compact #pf-suggestion-list,
+    PromptFooter.compact #pf-help-row {
+        padding: 0;
+    }
+    PromptFooter.compact #pf-suggestion-list {
+        max-height: 6;
+    }
+    PromptFooter.tight #pf-pills-row,
+    PromptFooter.tight #pf-help-row {
+        display: none;
+    }
+    PromptFooter.tight #pf-suggestion-list {
+        max-height: 4;
+    }
     """
 
     # ── reactive state ──────────────────────────────────────────────────────
@@ -87,6 +107,7 @@ class PromptFooter(Static):
     has_suggestions: reactive[bool] = reactive(False)
     help_open: reactive[bool] = reactive(False)
     selected_index: reactive[int] = reactive(-1)
+    compact_mode: reactive[str] = reactive("full")
     # Status pills
     bridge_label: reactive[str] = reactive("")
     bridge_color: reactive[str] = reactive("")
@@ -114,6 +135,12 @@ class PromptFooter(Static):
         self._on_help_toggle = on_help_toggle
         self._suggestion_items: list[object] = []
         self._viewport_size = 8
+        self._compact_viewports = {
+            "full": 8,
+            "narrow": 4,
+            "short": 3,
+            "tight": 2,
+        }
 
     # ── compose ─────────────────────────────────────────────────────────────
 
@@ -133,6 +160,7 @@ class PromptFooter(Static):
     def _mode_indicator_text(self) -> Text:
         """Build the mode/permission indicator text."""
         theme = get_theme()
+        compact = self.compact_mode != "full"
         text_muted = theme.colors.get("text_muted", "#888888")
 
         mode_colors: dict[str, str] = {
@@ -147,6 +175,12 @@ class PromptFooter(Static):
             "auto": " [auto] ",
             "bypass": " [bypass] ",
         }
+        compact_labels: dict[str, str] = {
+            "normal": "",
+            "plan": " [pl] ",
+            "auto": " [au] ",
+            "bypass": " [by] ",
+        }
         mode_symbols: dict[str, str] = {
             "normal": "",
             "plan": "◈",
@@ -155,15 +189,22 @@ class PromptFooter(Static):
         }
 
         color = mode_colors.get(self.mode, text_muted)
-        label = mode_labels.get(self.mode, "")
+        label = (compact_labels if compact else mode_labels).get(self.mode, "")
         symbol = mode_symbols.get(self.mode, "")
 
-        # Use Text() with style= param for color — avoids Rich markup parsing issues
         from rich.style import Style
         status_icons = {"idle": "○", "running": "◐", "thinking": "◑", "error": "✗"}
         status_icon = status_icons.get(self.status, "○")
 
-        t = Text(f"{status_icon} ", style=Style(color=text_muted))
+        t = Text(f"{status_icon}", style=Style(color=text_muted))
+        if compact:
+            if symbol:
+                t.append(f" {symbol}", style=Style(color=color))
+            elif label.strip():
+                t.append(label.strip(), style=Style(color=color))
+            return t
+
+        t.append(" ", style=Style(color=text_muted))
         if symbol:
             t.append(f"{symbol}{label}", style=Style(color=color))
         elif label:
@@ -176,49 +217,62 @@ class PromptFooter(Static):
         """Build the contextual hint based on current state."""
         theme = get_theme()
         dim = theme.colors.get("text_dim", "#555555")
-        accent = "yellow"
 
-        if self.has_suggestions:
+        if self.has_suggestions and self.compact_mode == "full":
             return ""
+
+        cycle_key = get_shortcut_display("cycle-mode") or "shift+tab"
+        compact_cycle = "⇧Tab"
 
         if self.is_loading:
             return f"[{dim}]esc: interrupt[/{dim}]"
 
+        if self.has_suggestions and self.compact_mode != "full":
+            return f"[{dim}]suggestions ↑↓ · Tab/→[/{dim}]"
+
         if self.mode != "normal":
-            cycle_key = get_shortcut_display("cycle-mode") or "shift+tab"
             hints: dict[str, str] = {
                 "plan": f"[{dim}]{cycle_key}: cycle mode[/{dim}]",
                 "auto": f"[{dim}]{cycle_key}: cycle mode[/{dim}]",
                 "bypass": f"[{dim}]{cycle_key}: cycle mode[/{dim}]",
             }
+            if self.compact_mode != "full":
+                compact_hints: dict[str, str] = {
+                    "plan": f"[{dim}]{compact_cycle}: mode[/{dim}]",
+                    "auto": f"[{dim}]{compact_cycle}: mode[/{dim}]",
+                    "bypass": f"[{dim}]{compact_cycle}: mode[/{dim}]",
+                }
+                return compact_hints.get(self.mode, "")
             return hints.get(self.mode, "")
 
-        return ""
+        return f"[{dim}]{cycle_key}: cycle mode[/{dim}]"
 
     # ── pills row ─────────────────────────────────────────────────────────
 
     def _pills_row(self) -> Text:
         """Build the status pills row."""
-        theme = get_theme()
-        dim = theme.colors.get("text_dim", "#555555")
-
         parts: list[Text] = []
 
         if self.bridge_label:
             color_map = {"success": "green", "warning": "yellow", "error": "red"}
             color = color_map.get(self.bridge_color, "dim")
-            parts.append(Text(f" [bridge:{self.bridge_label}] ", style=color))
+            bridge_text = self.bridge_label if self.compact_mode == "full" else self.bridge_label[:12]
+            prefix = "bridge" if self.compact_mode == "full" else "br"
+            parts.append(Text(f" [{prefix}:{bridge_text}] ", style=color))
 
         if self.agent_count > 0:
-            parts.append(Text(f" [agents:{self.agent_count}] ", style="cyan"))
+            label = "agents" if self.compact_mode == "full" else "ag"
+            parts.append(Text(f" [{label}:{self.agent_count}] ", style="cyan"))
 
         if self.task_count > 0:
-            parts.append(Text(f" [tasks:{self.task_count}] ", style="yellow"))
+            label = "tasks" if self.compact_mode == "full" else "tk"
+            parts.append(Text(f" [{label}:{self.task_count}] ", style="yellow"))
 
         if self.team_count > 0:
-            parts.append(Text(f" [team:{self.team_count}] ", style="magenta"))
+            label = "team" if self.compact_mode == "full" else "tm"
+            parts.append(Text(f" [{label}:{self.team_count}] ", style="magenta"))
 
-        if not parts:
+        if not parts or self.compact_mode == "tight":
             return Text("")
 
         result = Text("")
@@ -293,6 +347,15 @@ class PromptFooter(Static):
     def watch_selected_index(self, _: int) -> None:
         self._refresh()
 
+    def watch_compact_mode(self, _: str) -> None:
+        self.remove_class("compact")
+        self.remove_class("tight")
+        if self.compact_mode != "full":
+            self.add_class("compact")
+        if self.compact_mode == "tight":
+            self.add_class("tight")
+        self._refresh()
+
     def watch_help_open(self, open: bool) -> None:
         self._refresh()
 
@@ -310,6 +373,8 @@ class PromptFooter(Static):
 
     def _refresh(self) -> None:
         """Refresh all sub-widgets."""
+        if not self.is_mounted:
+            return
         try:
             mode_widget = self.query_one("#pf-mode-indicator", Static)
             hint_widget = self.query_one("#pf-hint", Static)
@@ -338,7 +403,8 @@ class PromptFooter(Static):
                 if sel < 0:
                     sel = 0
 
-                viewport = min(self._viewport_size, total)
+                viewport_limit = self._compact_viewports.get(self.compact_mode, self._viewport_size)
+                viewport = min(viewport_limit, total)
                 start = 0
                 if total > viewport:
                     start = max(0, sel - (viewport // 2))
@@ -386,18 +452,33 @@ class PromptFooter(Static):
                 if end < total:
                     sug_vert.mount(Static(f"[{dim}]↓ {total - end} more[/]"))
 
-                nav_hint = f"[{dim}]↑↓ navigate · PageUp/Down page · Tab accept[/{dim}]"
+                nav_hint = f"[{dim}]↑↓ navigate · PageUp/Down page · Tab/→ accept[/{dim}]"
+                if self.compact_mode == "narrow":
+                    nav_hint = f"[{dim}]↑↓ · Tab/→[/{dim}]"
+                elif self.compact_mode in {"short", "tight"}:
+                    nav_hint = f"[{dim}]↑↓ · Tab/→[/{dim}]"
                 sug_vert.mount(Static(nav_hint))
                 sug_scroll.display = True
                 sug_scroll.scroll_home(animate=False)
 
             help_row = self.query_one("#pf-help-row", Static)
-            if self.help_open:
-                help_row.update(f"[yellow]?[/yellow] close help")
+            if self.compact_mode == "tight":
+                help_row.display = False
             else:
-                help_row.update(f"[dim]?[/dim] {self._shortcuts}")
+                help_row.display = True
+                if self.help_open:
+                    help_row.update(f"[yellow]?[/yellow] close help")
+                elif self.compact_mode == "short":
+                    help_row.update("[dim]? help[/dim]")
+                elif self.compact_mode == "narrow":
+                    help_row.update("[dim]? help · ⇧Tab mode · ^R hist[/dim]")
+                else:
+                    help_row.update(f"[dim]?[/dim] {self._shortcuts}")
 
-        except Exception:
+        except Exception as e:
+            import traceback
+            import sys
+            traceback.print_exc(file=sys.stderr)
             pass
 
     # ── public API ─────────────────────────────────────────────────────────
@@ -409,6 +490,10 @@ class PromptFooter(Static):
     def set_status(self, status: str) -> None:
         """Set the current status (idle/running/thinking/error)."""
         self.status = status
+
+    def set_compact_mode(self, mode: str) -> None:
+        """Set the compact layout mode (full/narrow/short/tight)."""
+        self.compact_mode = mode
 
     def set_loading(self, loading: bool) -> None:
         """Set loading state."""

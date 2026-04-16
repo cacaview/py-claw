@@ -52,6 +52,7 @@ def get_default_keybindings() -> list[Keybinding]:
         Keybinding(key="up", command="history-up", description="Navigate history / suggestions"),
         Keybinding(key="down", command="history-down", description="Navigate history / suggestions"),
         Keybinding(key="tab", command="accept-suggestion", description="Accept suggestion / complete"),
+        Keybinding(key="shift+tab", command="cycle-mode", description="Cycle prompt mode"),
         Keybinding(key="right", command="accept-ghost-text", description="Accept inline ghost text"),
         Keybinding(key="?", command="toggle-help", description="Toggle this help menu"),
         Keybinding(key="ctrl+g", command="new-session", description="New session"),
@@ -177,6 +178,7 @@ _SHORTCUT_DISPLAY_MAP: dict[str, str] = {
     "accept-suggestion": "tab",
     "accept-ghost-text": "→",
     "toggle-help": "?",
+    "cycle-mode": "shift+tab",
     "new-session": "ctrl+g",
     "clear-log": "ctrl+l",
     "history-search": "ctrl+r",
@@ -187,8 +189,32 @@ _SHORTCUT_DISPLAY_MAP: dict[str, str] = {
     "vim-append": "a",
     "vim-visual": "v",
     "vim-normal": "esc",
-    "cycle-mode": "shift+tab",
 }
+
+
+_HELP_SHORTCUTS: dict[str, str] = {
+    "enter": "Submit prompt",
+    "esc": "Interrupt / cancel / close",
+    "↑ / ↓": "Navigate history / suggestions",
+    "tab": "Accept suggestion / complete",
+    "→": "Accept inline ghost text",
+    "shift+tab": "Cycle prompt mode",
+    "?": "Toggle this help menu",
+    "ctrl+g": "New session",
+    "ctrl+l": "Clear log",
+    "ctrl+c": "Quit",
+    "ctrl+r": "History search",
+    "ctrl+p": "Quick open",
+    "ctrl+m": "Model picker",
+    "ctrl+t": "Tasks panel",
+    "i": "Insert mode (vim)",
+    "a": "Append mode (vim)",
+    "v": "Visual mode (vim)",
+}
+
+
+_STATUS_SHORTCUTS = "Ctrl+G new · Ctrl+L clear · ?: help"
+_FOOTER_SHORTCUTS = "help · Ctrl+R: history · Ctrl+P: files · Ctrl+M: model · Ctrl+T: tasks"
 
 
 def get_shortcut_display(action: str) -> str | None:
@@ -211,21 +237,14 @@ def get_all_shortcuts_for_display() -> dict[str, str]:
         Dictionary mapping action names to display strings,
         suitable for HelpMenuDialog._shortcuts.
     """
-    return {
-        "enter": "Submit prompt",
-        "esc": "Interrupt / cancel / close",
-        "↑ / ↓": "Navigate history / suggestions",
-        "tab": "Accept suggestion / complete",
-        "→": "Accept inline ghost text",
-        "?": "Toggle this help menu",
-        "ctrl+g": "New session",
-        "ctrl+l": "Clear log",
-        "ctrl+c": "Quit",
-        "ctrl+r": "History search",
-        "ctrl+p": "Quick open",
-        "ctrl+m": "Model picker",
-        "ctrl+t": "Tasks panel",
-        "i": "Insert mode (vim)",
-        "a": "Append mode (vim)",
-        "v": "Visual mode (vim)",
-    }
+    return dict(_HELP_SHORTCUTS)
+
+
+def get_status_shortcuts_hint() -> str:
+    """Get the condensed status-line shortcut hint string."""
+    return _STATUS_SHORTCUTS
+
+
+def get_footer_shortcuts_hint() -> str:
+    """Get the footer shortcut hint string without the leading `?`."""
+    return _FOOTER_SHORTCUTS

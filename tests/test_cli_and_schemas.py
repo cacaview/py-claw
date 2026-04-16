@@ -40,6 +40,7 @@ from py_claw.schemas.common import (
     SDKLocalCommandOutputMessage,
     SDKMessage,
     SDKPartialAssistantMessage,
+    SDKPromptSuggestionMessage,
     SDKRequestStartMessage,
     SDKResultError,
     SDKResultSuccess,
@@ -1048,6 +1049,35 @@ def test_query_runtime_supports_replacing_turn_executor() -> None:
     assert runtime.current_session_id() is not None
     assert len(runtime.transcript) == 2
     assert runtime.state.query_runtime is runtime
+
+
+def test_query_runtime_emits_prompt_suggestion_message() -> None:
+    class PromptSuggestionExecutor:
+        def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
+            return ExecutedTurn(
+                assistant_text="Synthetic assistant reply",
+                prompt_suggestion="Continue from: Synthetic assistant reply",
+            )
+
+    runtime = QueryRuntime(turn_executor=PromptSuggestionExecutor())
+
+    outputs = runtime.handle_user_message(
+        SDKUserMessage(
+            type="user",
+            message={"role": "user", "content": "hello prompt suggestion"},
+            parent_tool_use_id=None,
+        )
+    )
+
+    assert len(outputs) == 6
+    assert isinstance(outputs[0], SDKSessionStateChangedMessage)
+    assert isinstance(outputs[1], SDKRequestStartMessage)
+    assert isinstance(outputs[2], SDKAssistantMessage)
+    assert isinstance(outputs[3], SDKResultSuccess)
+    assert isinstance(outputs[4], SDKPromptSuggestionMessage)
+    assert outputs[4].suggestion == "Continue from: Synthetic assistant reply"
+    assert isinstance(outputs[5], SDKSessionStateChangedMessage)
+    assert outputs[5].state == "idle"
 
 
 
@@ -2333,6 +2363,21 @@ def test_sdk_message_union_accepts_hook_and_task_messages() -> None:
     assert isinstance(hook_message, SDKHookResponseMessage)
     assert isinstance(task_message, SDKTaskNotificationMessage)
     assert task_message.summary == "done"
+
+
+def test_sdk_message_union_accepts_prompt_suggestion_message() -> None:
+    adapter = TypeAdapter(SDKMessage)
+    message = adapter.validate_python(
+        {
+            "type": "prompt_suggestion",
+            "suggestion": "Continue from: hello world",
+            "uuid": "msg-3",
+            "session_id": "sess-1",
+        }
+    )
+
+    assert isinstance(message, SDKPromptSuggestionMessage)
+    assert message.suggestion == "Continue from: hello world"
 
 
 def test_structured_io_ignores_keep_alive_and_applies_env_updates() -> None:

@@ -13,6 +13,7 @@ from py_claw.schemas.common import (
     SDKAssistantMessage,
     SDKLocalCommandOutputMessage,
     SDKPartialAssistantMessage,
+    SDKPromptSuggestionMessage,
     SDKRequestStartEvent,
     SDKRequestStartMessage,
     SDKResultError,
@@ -89,6 +90,7 @@ class ExecutedTurn:
     duration_api_ms: float = 0.0
     total_cost_usd: float = 0.0
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
+    prompt_suggestion: str | None = None
 
 
 class QueryTurnFailure(Exception):
@@ -131,6 +133,7 @@ class BackendTurnExecutor:
             duration_api_ms=result.duration_api_ms,
             total_cost_usd=result.total_cost_usd,
             tool_calls=[self._to_tool_call_request(tool_call) for tool_call in result.tool_calls],
+            prompt_suggestion=result.prompt_suggestion,
         )
 
     def _to_tool_call_request(self, tool_call: BackendToolCall) -> ToolCallRequest:
@@ -389,6 +392,9 @@ class QueryRuntime:
                 ),
             ]
         )
+        prompt_suggestion = self._prompt_suggestion_message(session_id, executed.prompt_suggestion)
+        if prompt_suggestion is not None:
+            outputs.append(prompt_suggestion)
         return outputs
 
     def _finalize_outputs(
@@ -554,8 +560,27 @@ class QueryRuntime:
         if not explicit_allow:
             permission_target = runtime.permission_target_for(tool_call.tool_name, tool_input)
             evaluation = permission_engine.evaluate(permission_target.tool_name, permission_target.content)
+            
+            if evaluation.behavior == "ask":
+                callback = getattr(self.state, "permission_ask_callback", None)
+                if callback is not None:
+                    behavior, updated_input, callback_msg = callback(
+                        tool_use_id, tool_call.tool_name, tool_input, permission_target.content
+                    )
+                    if behavior == "allow":
+                        explicit_allow = True
+                        if updated_input is not None:
+                            tool_input = updated_input
+                        evaluation.behavior = "allow"
+                    else:
+                        evaluation.behavior = "deny"
+                        evaluation.reason = callback_msg or "User denied permission"
+
             if evaluation.behavior != "allow":
                 message = runtime._build_permission_message(tool_call.tool_name, evaluation.reason, evaluation.mode)
+                if getattr(evaluation, "reason", None) == "User denied permission":
+                    message = "User denied permission"
+                
                 self.state.hook_runtime.run_permission_denied(
                     settings=settings,
                     cwd=self.state.cwd,
@@ -859,6 +884,20 @@ class QueryRuntime:
             type="stream_event",
             event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": content}},
             parent_tool_use_id="",
+            uuid=str(uuid4()),
+            session_id=session_id,
+        )
+
+    def _prompt_suggestion_message(
+        self,
+        session_id: str,
+        suggestion: str | None,
+    ) -> SDKPromptSuggestionMessage | None:
+        if not suggestion:
+            return None
+        return SDKPromptSuggestionMessage(
+            type="prompt_suggestion",
+            suggestion=suggestion,
             uuid=str(uuid4()),
             session_id=session_id,
         )

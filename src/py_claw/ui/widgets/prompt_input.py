@@ -15,7 +15,7 @@ Features:
 """
 from __future__ import annotations
 
-from enum import auto, Enum
+from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
 from rich.text import Text
@@ -26,6 +26,7 @@ from textual.reactive import reactive
 from textual.suggester import Suggester
 from textual.widgets import Input, Static
 
+from py_claw.services.keybindings import get_shortcut_display
 from py_claw.ui.theme import get_theme
 
 if TYPE_CHECKING:
@@ -118,10 +119,12 @@ class PromptInput(Vertical):
         padding: 0 1;
         color: $text-muted;
     }
-    PromptInput #pi-suggestion-list {
-        height: auto;
-        padding: 0 1;
-        color: $text;
+    PromptInput.compact #pi-mode-bar,
+    PromptInput.compact #pi-hint {
+        padding: 0;
+    }
+    PromptInput.compact #pi-input {
+        padding: 0;
     }
     /* Inline ghost text for slash command completion */
     PromptInput #pi-input .input--suggestion {
@@ -136,6 +139,7 @@ class PromptInput(Vertical):
     suggestion_items: reactive[list["SuggestionItem"]] = reactive([])
     selected_index: reactive[int] = reactive(-1)
     pasted_content_label: reactive[str] = reactive("")
+    compact_mode: reactive[str] = reactive("full")
 
     # ── messages ────────────────────────────────────────────────────────────
 
@@ -167,6 +171,13 @@ class PromptInput(Vertical):
     class HelpToggled(Message):
         """Emitted when the user presses ? to toggle help."""
 
+    class PromptModeChanged(Message):
+        """Emitted when the prompt mode changes via keyboard cycling."""
+
+        def __init__(self, mode: PromptMode) -> None:
+            super().__init__()
+            self.mode = mode
+
     class VimModeChanged(Message):
         """Emitted when vim editing mode changes."""
 
@@ -180,6 +191,14 @@ class PromptInput(Vertical):
         def __init__(self, index: int) -> None:
             super().__init__()
             self.index = index
+
+    class SuggestionsChanged(Message):
+        """Emitted when the visible suggestion items change."""
+
+        def __init__(self, items: list[object], selected_index: int) -> None:
+            super().__init__()
+            self.items = items
+            self.selected_index = selected_index
 
     # ── init ────────────────────────────────────────────────────────────────
 
@@ -197,6 +216,7 @@ class PromptInput(Vertical):
         history: list[str] | None = None,
         suggestion_engine: "SuggestionEngine | None" = None,
         pasted_content_label: str = "",
+        compact_mode: str = "full",
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
@@ -206,6 +226,7 @@ class PromptInput(Vertical):
         self.vim_mode = vim_mode
         self.hint = hint
         self.pasted_content_label = pasted_content_label
+        self.compact_mode = compact_mode
         self._placeholder = placeholder
         self._on_submit = on_submit
         self._on_interrupt = on_interrupt
@@ -215,7 +236,6 @@ class PromptInput(Vertical):
         self._history_pos: int = -1  # -1 = live buffer
         # Unified suggestion engine (commands + paths + shell history)
         self._engine = suggestion_engine
-        self._suggestion_viewport_size = 8
 
     # ── compose ─────────────────────────────────────────────────────────────
 
@@ -224,16 +244,17 @@ class PromptInput(Vertical):
         yield Static(self._mode_bar_text(), id="pi-mode-bar")
         yield Input(placeholder=self._placeholder, id="pi-input", suggester=suggester)
         yield Static(self.hint, id="pi-hint")
-        yield Static("", id="pi-suggestion-list")
 
     # ── mode bar ────────────────────────────────────────────────────────────
 
     def _mode_bar_text(self) -> Text:
         theme = get_theme()
+        compact = self.compact_mode != "full"
         parts: list[tuple[str, str]] = []
 
         if self._model:
-            parts.append((f"[{self._model}]", "dim"))
+            model_text = self._model if not compact else self._compact_model_label(self._model)
+            parts.append((f"[{model_text}]", "dim"))
 
         text_muted = theme.colors.get("text_muted", "#888888")
         mode_colors: dict[PromptMode, str] = {
@@ -248,104 +269,88 @@ class PromptInput(Vertical):
             PromptMode.AUTO: " [auto] ",
             PromptMode.BYPASS_PERMISSIONS: " [bypass] ",
         }
-        label = mode_labels.get(self.prompt_mode, "")
+        compact_labels: dict[PromptMode, str] = {
+            PromptMode.NORMAL: "",
+            PromptMode.PLAN: " [pl] ",
+            PromptMode.AUTO: " [au] ",
+            PromptMode.BYPASS_PERMISSIONS: " [by] ",
+        }
+        label_map = compact_labels if compact else mode_labels
+        label = label_map.get(self.prompt_mode, "")
         if label:
             parts.append((label, mode_colors.get(self.prompt_mode, "")))
 
         if self.vim_mode:
-            parts.append((f" {self.vim_mode.value} ", "bold"))
+            vim_text = self.vim_mode.value if not compact else self.vim_mode.value[:3]
+            parts.append((f" {vim_text} ", "bold"))
 
-        # Pasted content indicator
         if self.pasted_content_label:
-            parts.append((f" [paste: {self.pasted_content_label}] ", "yellow"))
+            paste_label = self.pasted_content_label if not compact else self.pasted_content_label[:12]
+            parts.append((f" [paste: {paste_label}] ", "yellow"))
 
         t = Text()
         for text, style in parts:
             t.append(text, style=style or "")
         return t
 
+    def _compact_model_label(self, model: str) -> str:
+        """Return a shorter model label for compact layouts."""
+        known = {
+            "claude-sonnet-4-20250514": "sonnet-4",
+            "claude-opus-4-6-20250514": "opus-4.6",
+            "claude-opus-4-5-20250929": "opus-4.5",
+            "claude-sonnet-4-5-20250929": "sonnet-4.5",
+        }
+        if model in known:
+            return known[model]
+        parts = [part for part in model.split("-") if part]
+        return "-".join(parts[-2:]) if len(parts) >= 2 else model
+
+    def _compact_hint_text(self, hint: str) -> str:
+        """Return a shorter hint string for compact layouts."""
+        if self.compact_mode == "full" or not hint:
+            return hint
+        cycle_display = get_shortcut_display("cycle-mode") or "shift+tab"
+        replacements = {
+            "Type a prompt or /command": "prompt or /cmd",
+            "shell history — ↑↓ to navigate": "history ↑↓",
+            "path — Tab to complete": "path · Tab",
+            "mid-input /command — Tab to complete": "mid /cmd · Tab",
+            f"{cycle_display}: cycle mode": "mode · ⇧Tab",
+        }
+        if hint in replacements:
+            return replacements[hint]
+        return hint if len(hint) <= 32 else hint[:29] + "..."
+
     # ── reactive watchers ───────────────────────────────────────────────────
 
     def watch_suggestion_items(self, items: list[object]) -> None:
-        """Update the suggestion list display when items change."""
-        self._update_suggestion_list()
+        """Notify REPLScreen when suggestion items change (footer handles rendering)."""
+        self._sync_suggestions_to_screen(items, self.selected_index)
+        self.post_message(self.SuggestionsChanged(items, self.selected_index))
 
     def watch_selected_index(self, index: int) -> None:
-        """Re-render suggestion list when selection changes."""
-        self._update_suggestion_list()
-        # Notify parent (REPLScreen) so it can sync footer selected_index
+        """Notify parent (REPLScreen) so it can sync footer selected_index."""
+        self._sync_selected_index_to_screen(index)
         self.post_message(self.SuggestionIndexChanged(index))
 
-    def _update_suggestion_list(self) -> None:
-        """Build and display the suggestion list."""
+    def _sync_suggestions_to_screen(self, items: list[object], selected_index: int) -> None:
+        """Best-effort direct sync for footer suggestion payload in TUI tests/runtime."""
         try:
-            list_widget = self.get_widget_by_id("pi-suggestion-list")
-            if not isinstance(list_widget, Static):
-                return
-            if not self.suggestion_items:
-                list_widget.update("")
-                return
+            from py_claw.ui.screens.repl import REPLScreen
+            screen = self.app.query_one(REPLScreen)
+            footer = screen.query_one("#repl-footer")
+            footer.set_suggestions(items, selected_index)
+        except Exception:
+            pass
 
-            theme = get_theme()
-            dim = theme.colors.get("text_dim", "#555555")
-            accent = "yellow"
-
-            total = len(self.suggestion_items)
-            sel = self.selected_index
-            if sel < 0:
-                sel = 0
-
-            viewport = min(self._suggestion_viewport_size, total)
-            start = 0
-            if total > viewport:
-                start = max(0, sel - (viewport // 2))
-                start = min(start, total - viewport)
-            end = min(total, start + viewport)
-
-            lines: list[str] = []
-            if start > 0:
-                lines.append(f"[{dim}]↑ {start} more[/]")
-
-            for i in range(start, end):
-                item = self.suggestion_items[i]
-                is_selected = i == self.selected_index
-                prefix = "▶" if is_selected else " "
-
-                if hasattr(item, "display_text"):
-                    display = item.display_text.strip()
-                    desc = getattr(item, "description", "") or ""
-                    tag = getattr(item, "tag", "") or ""
-                    metadata = getattr(item, "metadata", None)
-                    arg_hint = ""
-                    if isinstance(metadata, dict):
-                        arg_hint = str(metadata.get("argumentHint") or "")
-                    sug_type = getattr(item, "type", None)
-                    type_tag = tag if tag else (sug_type.value if sug_type else "")
-                else:
-                    display = str(item)
-                    desc = ""
-                    type_tag = ""
-                    arg_hint = ""
-
-                if is_selected:
-                    parts = [f"[{accent}]{prefix} {display}[/]"]
-                    if arg_hint:
-                        parts.append(f"[dim]{arg_hint}[/]")
-                    if desc:
-                        parts.append(f"[dim]— {desc}[/]")
-                    if type_tag:
-                        parts.append(f"[{dim}][{type_tag}][/]")
-                    lines.append(" ".join(parts))
-                else:
-                    line = f"[{dim}]{prefix} {display}[/]"
-                    if arg_hint:
-                        line += f" [{dim}]{arg_hint}[/]"
-                    lines.append(line)
-
-            if end < total:
-                lines.append(f"[{dim}]↓ {total - end} more[/]")
-
-            list_widget.update("\n".join(lines))
+    def _sync_selected_index_to_screen(self, index: int) -> None:
+        """Best-effort direct sync for footer selection state in TUI tests/runtime."""
+        try:
+            from py_claw.ui.screens.repl import REPLScreen
+            screen = self.app.query_one(REPLScreen)
+            footer = screen.query_one("#repl-footer")
+            footer.selected_index = index
         except Exception:
             pass
 
@@ -364,9 +369,17 @@ class PromptInput(Vertical):
         try:
             hint_widget = self.get_widget_by_id("pi-hint")
             if isinstance(hint_widget, Static):
-                hint_widget.update(new_hint)
+                hint_widget.update(self._compact_hint_text(new_hint))
         except Exception:
             pass
+
+    def watch_compact_mode(self, _: str) -> None:
+        if self.compact_mode == "full":
+            self.remove_class("compact")
+        else:
+            self.add_class("compact")
+        self.watch_prompt_mode(self.prompt_mode)
+        self.watch_hint(self.hint)
 
     def watch_pasted_content_label(self, label: str) -> None:
         """Re-render mode bar when pasted content label changes."""
@@ -381,6 +394,10 @@ class PromptInput(Vertical):
         self.pasted_content_label = ""
 
     # ── public API ──────────────────────────────────────────────────────────
+
+    def set_compact_mode(self, mode: str) -> None:
+        """Set the compact layout mode (full/narrow/short/tight)."""
+        self.compact_mode = mode
 
     def focus_input(self) -> None:
         """Move keyboard focus to the inner Input widget."""
@@ -426,16 +443,16 @@ class PromptInput(Vertical):
 
     def set_suggestion_items(self, items: list[object]) -> None:
         """Set the available suggestion items (from SuggestionEngine)."""
-        self.suggestion_items = items  # type: ignore[assignment]
         self.selected_index = -1
+        self.suggestion_items = items  # type: ignore[assignment]
 
     def update_suggestions(self, text: str, cursor_offset: int) -> None:
         """Update suggestion list from the engine based on current input."""
         if not self._engine:
             return
         items = self._engine.get_suggestions(text, cursor_offset)
-        self.suggestion_items = items  # type: ignore[assignment]
         self.selected_index = -1
+        self.suggestion_items = items  # type: ignore[assignment]
 
     def apply_selected_suggestion(self) -> bool:
         """Apply the currently selected suggestion to the input. Returns True if applied."""
@@ -494,6 +511,21 @@ class PromptInput(Vertical):
         self.selected_index = -1
         return True
 
+    def _cycle_mode(self) -> None:
+        """Cycle prompt mode between normal/plan/auto/bypass."""
+        order = [
+            PromptMode.NORMAL,
+            PromptMode.PLAN,
+            PromptMode.AUTO,
+            PromptMode.BYPASS_PERMISSIONS,
+        ]
+        try:
+            index = order.index(self.prompt_mode)
+        except ValueError:
+            index = 0
+        self.prompt_mode = order[(index + 1) % len(order)]
+        self.post_message(self.PromptModeChanged(self.prompt_mode))
+
     # ── event handlers ──────────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -501,7 +533,6 @@ class PromptInput(Vertical):
         if event.input.id != "pi-input":
             return
         value = event.value
-        # ? alone toggles help
         if value == "?":
             self.clear()
             self.post_message(self.HelpToggled())
@@ -587,8 +618,19 @@ class PromptInput(Vertical):
             self.post_message(self.Interrupted())
             return
 
+        if event.key == "shift+tab":
+            event.stop()
+            self._cycle_mode()
+            return
+
+        char = getattr(event, "character", None) or ""
+        if char == "?" and not inp.value:
+            event.stop()
+            self.post_message(self.HelpToggled())
+            return
+
         # Tab: accept ghost text (from suggester) or selected suggestion
-        if event.key == "tab":
+        if event.key in {"tab", "right"}:
             event.stop()
             # First: check if Input has ghost text from suggester
             if hasattr(inp, "_suggestion") and inp._suggestion:
@@ -658,7 +700,9 @@ class PromptInput(Vertical):
                 if count == 0:
                     return
                 cur = self.selected_index if self.selected_index >= 0 else 0
-                new_index = (cur - PAGE_SIZE) % count  # wraps to last
+                new_index = cur - PAGE_SIZE
+                if new_index < 0:
+                    new_index = 0  # stop at first, don't wrap
                 self.selected_index = new_index
                 event.stop()
 

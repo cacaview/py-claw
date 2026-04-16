@@ -14,6 +14,8 @@ from py_claw.services.keybindings.service import (
     save_keybindings,
     get_shortcut_display,
     get_all_shortcuts_for_display,
+    get_status_shortcuts_hint,
+    get_footer_shortcuts_hint,
 )
 from py_claw.services.keybindings.types import Keybinding, KeybindingsConfig, KeybindingsResult
 
@@ -29,6 +31,8 @@ __all__ = [
     "get_keybindings_info",
     "get_shortcut_display",
     "get_all_shortcuts_for_display",
+    "get_status_shortcuts_hint",
+    "get_footer_shortcuts_hint",
     "Keybinding",
     "KeybindingsConfig",
     "KeybindingsResult",

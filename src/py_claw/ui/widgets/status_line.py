@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from textual.widgets import Static
 
+from py_claw.services.keybindings import get_status_shortcuts_hint
 from py_claw.ui.theme import get_theme
 from py_claw.ui.widgets.themed_text import ThemedText
 
@@ -39,7 +40,7 @@ class StatusLine(Static):
     ) -> None:
         self._status = status
         self._model = model
-        self._shortcuts = shortcuts
+        self._shortcuts = shortcuts or get_status_shortcuts_hint()
         self._tokens = tokens
         super().__init__(id=id, classes=classes)
         self._update_content()

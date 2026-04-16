@@ -33,7 +33,13 @@ from py_claw.services.session_storage.common import (
 
 from py_claw.services.session_storage.storage import (
     SessionStorageEngine,
+    append_to_session,
+    extract_current_session_metadata,
+    flush_session_storage,
+    get_current_session_file,
+    get_current_session_id,
     get_session_storage_engine,
+    set_current_session,
 )
 
 from py_claw.services.session_storage.search import (
@@ -63,6 +69,12 @@ __all__ = [
     # Storage engine
     "SessionStorageEngine",
     "get_session_storage_engine",
+    "set_current_session",
+    "get_current_session_id",
+    "get_current_session_file",
+    "append_to_session",
+    "extract_current_session_metadata",
+    "flush_session_storage",
     # Search
     "SessionSearchResult",
     "search_sessions",

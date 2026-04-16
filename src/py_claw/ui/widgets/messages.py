@@ -100,28 +100,25 @@ class MessageList(ScrollableContainer):
         color = role_colors.get(msg.role, theme.colors.get("text", "#ffffff"))
         label = role_labels.get(msg.role, "Unknown")
 
-        # Build message container
-        msg_container = Vertical(
-            id=f"message-{index}",
-            classes="message-item",
-        )
-
         # Header with role and optional timestamp
         header_parts = [f"[{color}]{label}[/{color}]"]
 
         if self._show_timestamps and msg.timestamp:
             time_str = msg.timestamp.strftime("%H:%M:%S")
-            header_parts.append(f" [/{theme.colors.get('text_dim', '#555555')}]{time_str}[/]")
+            header_parts.append(f" [{theme.colors.get('text_dim', '#555555')}]{time_str}[/]")
 
         if msg.status:
             status_colors = {"pending": "warning", "complete": "success", "error": "error"}
             status_color = status_colors.get(msg.status, "muted")
-            header_parts.append(f" [/{theme.colors.get(status_color, '#888888')}]{msg.status}[/]")
+            header_parts.append(f" [{theme.colors.get(status_color, '#888888')}]{msg.status}[/]")
 
-        msg_container.mount(ThemedText(" ".join(header_parts), variant="normal"))
-
-        # Content
-        msg_container.mount(ThemedText(msg.content, variant="normal"))
+        # Build message container
+        msg_container = Vertical(
+            ThemedText(" ".join(header_parts), variant="normal"),
+            ThemedText(msg.content, variant="normal"),
+            id=f"message-{index}",
+            classes="message-item",
+        )
 
         return msg_container
 
@@ -130,7 +127,36 @@ class MessageList(ScrollableContainer):
         self._messages.append(msg)
         container = self.query_one("#message-list-content", Vertical)
         container.mount(self._make_message_widget(msg, len(self._messages) - 1))
-        self.scroll_end()
+        self.scroll_end(animate=False)
+
+    def update_last_message(self, new_content: str, append: bool = False) -> None:
+        """Update or append to the content of the last message in the list.
+        
+        Args:
+            new_content: The text to set or append.
+            append: If True, append to existing content, otherwise replace it.
+        """
+        if not self._messages:
+            return
+
+        idx = len(self._messages) - 1
+        msg = self._messages[idx]
+        
+        if append:
+            msg.content += new_content
+        else:
+            msg.content = new_content
+
+        # Find the message container and its content text widget
+        # Index 1 is the content ThemedText (index 0 is the header)
+        try:
+            container = self.query_one(f"#message-{idx}", Vertical)
+            content_widget = container.children[1]
+            if hasattr(content_widget, 'update'):
+                content_widget.update(msg.content)
+            self.scroll_end(animate=False)
+        except Exception:
+            pass
 
     def clear_messages(self) -> None:
         """Clear all messages."""

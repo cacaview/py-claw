@@ -202,8 +202,8 @@ def generate_command_suggestions(
     if not is_command_input(input_str):
         return []
 
-    # If there are arguments, don't show suggestions
-    if has_command_args(input_str):
+    # If there's a space, the user has moved on to arguments (or invalid command), so no command suggestions
+    if " " in input_str:
         return []
 
     query = input_str[1:].lower().strip()

@@ -39,8 +39,6 @@ class PermissionDialog(Dialog):
         self._tool_name = tool_name
         self._message = message
         self._params = params or {}
-        self._on_allow = on_allow
-        self._on_deny = on_deny
         super().__init__(
             title=f"Permission: {tool_name}",
             body=self._format_body(),
@@ -49,6 +47,8 @@ class PermissionDialog(Dialog):
             id=id,
             classes=classes,
         )
+        self._on_allow = on_allow
+        self._on_deny = on_deny
 
     def _format_body(self) -> str:
         """Format the permission request body."""

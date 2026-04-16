@@ -42,6 +42,7 @@ class SuggestionType(str, Enum):
     AGENT = "agent"
     CHANNEL = "channel"
     MID_INPUT_SLASH = "mid_input_slash"
+    PROMPT = "prompt"
 
 
 @dataclass(slots=True, frozen=True)
@@ -200,7 +201,8 @@ class SuggestionEngine:
             return SuggestionType.AGENT
 
         # Case 5: #-mention channel — e.g. "#" or "#general"
-        if re.search(r"(^|\s)#([a-z0-9][a-z0-9_-]*)$", trimmed):
+        # The `?` makes the char class optional so bare "#" matches
+        if re.search(r"(^|\s)#([a-z0-9][a-z0-9_-]*)?$", trimmed):
             return SuggestionType.CHANNEL
 
         # Case 6: Shell completion — bare text that looks like a shell command
@@ -271,6 +273,10 @@ class SuggestionEngine:
             return self._get_path_suggestions(text)
         if sug_type == SuggestionType.SHELL_HISTORY:
             return self._get_shell_history_suggestions(text)
+        if sug_type == SuggestionType.AGENT:
+            return self._get_agent_suggestions(text)
+        if sug_type == SuggestionType.CHANNEL:
+            return self._get_channel_suggestions(text)
 
         return []
 
@@ -289,7 +295,7 @@ class SuggestionEngine:
             match = get_best_command_match(partial, self._command_items)
             if match:
                 suffix, _ = match
-                return suffix
+                return suffix + " "
         elif sug_type == SuggestionType.PATH:
             suffix = self._get_path_suffix(text)
             if suffix:
@@ -440,7 +446,7 @@ class SuggestionEngine:
         match = re.search(r"(^|\s)@([\w-]*)$", text.strip())
         if not match:
             return []
-        partial = match.group(2).lower()
+        partial = (match.group(2) or "").lower()
 
         suggestions: list[Suggestion] = []
 
@@ -487,11 +493,11 @@ class SuggestionEngine:
         This provides a stub that searches teammates' channel knowledge,
         or returns an empty list with a hint when no MCP is available.
         """
-        # Extract partial after "#"
-        match = re.search(r"(^|\s)#([a-z0-9][a-z0-9_-]*)$", text.strip())
+        # Extract partial after "#" — the `?` makes it optional so bare "#" works
+        match = re.search(r"(^|\s)#([a-z0-9][a-z0-9_-]*)?$", text.strip())
         if not match:
             return []
-        partial = match.group(2).lower()
+        partial = (match.group(2) or "").lower()
 
         # Stub: suggest common Slack-style channel names based on partial match.
         # Real implementation queries Slack MCP server via slack_search_channels tool.

@@ -108,8 +108,12 @@ class AskUserQuestionTool:
             action = hook_result.action
             content = hook_result.content
         else:
-            action = "cancel"
-            content = None
+            callback = getattr(state, "ask_user_callback", None)
+            if callback is not None:
+                action, content = callback(arguments)
+            else:
+                action = "cancel"
+                content = None
 
         result_hook = state.hook_runtime.run_elicitation_result(
             settings=settings,
