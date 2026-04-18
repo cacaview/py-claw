@@ -109,14 +109,7 @@
 
 ## 变更记录 (Changelog)
 
-- 2026-04-13：新增 MCP 服务改进（对齐 TypeScript 参考树）：
-  - 新增 `env_expansion.py`：环境变量展开（支持 `${VAR}` 和 `${VAR:-default}` 语法）
-  - 新增 `normalization.py`：MCP 名称规范化（`normalize_name_for_mcp`、`mcp_info_from_string`、`build_mcp_tool_name` 等）
-  - 新增 `utils.py`：服务器过滤、工具/命令过滤、配置哈希、政策过滤等工具函数
-  - 新增 `config.py`：MCP 配置管理（去重、签名生成、allowlist/denylist、`.mcp.json` 读写）
-  - 新增 `channel_permissions.py`：通道权限回调（permission relay 支持）
-  - 扩展 `schemas/common.py`：新增 `McpOAuthConfig`、`McpSSEIDEServerConfig`、`McpWebSocketIDEServerConfig` 等配置类型
-  - 新增 `tests/test_mcp_service.py`：43 个测试用例覆盖新增功能
-- 2026-04-11：补充 MCP Client 改进：持久化 stdio transport、SSE transport 支持、initialize 握手、prompts 方法、resource templates 方法。
+- 2026-04-18：MCP 真实连接补全完成 — `McpRuntime` 实现 stdio（持久化子进程）、HTTP、SSE、WebSocket（wsproto）、SDK（`_SdkMcpTransport`）、Claude AI Proxy（`_ClaudeAIProxyMcpTransport`）六种 transport 完整 dispatch；`set_sdk_message_handler()` 注入 SDK bridge；`initialize()` 完整握手；`is_session_expired()`/`reconnect_if_expired()` inactive 检测；`send_notification()`/`cancel_request()` JSON-RPC 支持；`list_prompts()`/`get_prompt()`/`list_resource_templates()`；54 个 MCP 测试全部通过
+- 2026-04-13：新增 MCP 服务改进（对齐 TypeScript 参考树）：新增 `env_expansion.py`、`normalization.py`、`utils.py`、`config.py`、`channel_permissions.py`；扩展 `schemas/common.py`；新增 `tests/test_mcp_service.py`（43 个测试）
 - 2026-04-10：修正文档与实现偏差，补充 HTTP transport、resource 读取、live state 与当前未实现边界说明。
 - 2026-04-08：补全文档，增加 scope 推导、runtime 覆盖与测试覆盖说明。

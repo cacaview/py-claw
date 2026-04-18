@@ -198,15 +198,7 @@ def _handle_input_change(self, text: str) -> None:
 - `ui/dialogs/__init__.py` 保持轻量
 - 不要在包级别 eager import 全部 dialog
 
-### 2. `session_storage.flush_session_storage` 缺失
-
-现象：`DesktopHandoff` 导入失败，间接拖垮 overlay 导入链。
-
-处理原则：
-- 保持与调用方兼容的 awaitable flush hook
-- 即便当前实现是同步写入，也要保留 best-effort `flush_session_storage()`
-
-### 3. Prompt suggestion 导航状态可能只更新了 `PromptInput`，没同步到 `PromptFooter`
+### 2. Prompt suggestion 导航状态可能只更新了 `PromptInput`，没同步到 `PromptFooter`
 
 现象：
 - `/` 后 suggestion 出现
@@ -219,6 +211,14 @@ def _handle_input_change(self, text: str) -> None:
 - `PromptInput.post_message(...)`
 - `REPLScreen.on_message()` 对 `PromptInput.SuggestionIndexChanged` 的路由
 - 清空 suggestion 时 footer 是否同步更新
+
+### 3. `ListItem` 重名 ID 导致 `QuickOpenDialog` / `TasksPanel` mount 失败
+
+现象：多个 ListItem 使用相同 `item_id`（如路径相同的文件），`_sanitize_item_id` 生成的 widget id 重复，Textual 抛出 `DuplicateIds` 异常。
+
+已修复：`ListItem` 增加 `item_index` 参数，`_sanitize_item_id` 在 `index` 不为 `None` 时追加 `-{index}` 后缀；`quick_open.py` 和 `tasks_panel.py` 调用时传入 `item_index=i`。
+
+调试建议：若 `DuplicateIds` 仍出现，检查是否有其他 dialog 使用相同 `item_id` 生成逻辑。
 
 ---
 

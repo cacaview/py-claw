@@ -20,6 +20,7 @@ from py_claw.fork.protocol import (
     ForkMessage,
     ForkOutputMessage,
     ForkResultMessage,
+    ForkSpeculationStartMessage,
     ForkStopMessage,
     ForkTurnMessage,
     NDJSONParser,
@@ -124,6 +125,35 @@ class ForkedAgentProcess:
         """Send a turn message to child (async — use send_turn_sync for blocking wait)."""
         msg = ForkTurnMessage(query_text=query_text, turn_count=turn_count)
         self._send(msg)
+
+    def start_speculation(
+        self,
+        query_text: str,
+        turn_count: int,
+        overlay_path: str,
+        main_cwd: str,
+        max_turns: int = 20,
+    ) -> None:
+        """Start a speculation turn in the child subprocess.
+
+        Fire-and-forget — does not wait for result. Use iter_messages()
+        or poll _pending_results to collect results.
+
+        Args:
+            query_text: The user message to send.
+            turn_count: Monotonic counter for result routing.
+            overlay_path: Path to the speculation overlay directory.
+            main_cwd: Main working directory for path translation.
+            max_turns: Maximum number of turns before forced stop.
+        """
+        spec_msg = ForkSpeculationStartMessage(
+            overlay_path=overlay_path,
+            main_cwd=main_cwd,
+            max_turns=max_turns,
+        )
+        self._send(spec_msg)
+        turn_msg = ForkTurnMessage(query_text=query_text, turn_count=turn_count)
+        self._send(turn_msg)
 
     def send_turn_sync(self, query_text: str, turn_count: int, timeout: float = 60.0) -> dict[str, Any]:
         """Send a turn message and wait for the result synchronously.

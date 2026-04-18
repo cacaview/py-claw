@@ -114,6 +114,10 @@ class PromptFooter(Static):
     agent_count: reactive[int] = reactive(0)
     task_count: reactive[int] = reactive(0)
     team_count: reactive[int] = reactive(0)
+    # Speculation state
+    speculation_status: reactive[str] = reactive("idle")  # 'idle' | 'active'
+    speculation_boundary: reactive[str] = reactive("")
+    speculation_tool_count: reactive[int] = reactive(0)
 
     # ── messages ────────────────────────────────────────────────────────────
 
@@ -272,6 +276,19 @@ class PromptFooter(Static):
             label = "team" if self.compact_mode == "full" else "tm"
             parts.append(Text(f" [{label}:{self.team_count}] ", style="magenta"))
 
+        # Speculation indicator
+        if self.speculation_status == "active":
+            boundary_label = self.speculation_boundary or "spec"
+            if self.compact_mode == "full":
+                spec_text = f"spec:{boundary_label}"
+            elif self.compact_mode in ("narrow", "short"):
+                spec_text = boundary_label[:8]
+            else:
+                spec_text = boundary_label[:6]
+            if self.speculation_tool_count > 0:
+                spec_text = f"{spec_text}:{self.speculation_tool_count}"
+            parts.append(Text(f" [{spec_text}] ", style="magenta"))
+
         if not parts or self.compact_mode == "tight":
             return Text("")
 
@@ -369,6 +386,15 @@ class PromptFooter(Static):
         self._refresh()
 
     def watch_team_count(self, _: int) -> None:
+        self._refresh()
+
+    def watch_speculation_status(self, _: str) -> None:
+        self._refresh()
+
+    def watch_speculation_boundary(self, _: str) -> None:
+        self._refresh()
+
+    def watch_speculation_tool_count(self, _: int) -> None:
         self._refresh()
 
     def _refresh(self) -> None:
@@ -539,3 +565,20 @@ class PromptFooter(Static):
     def set_team_count(self, count: int) -> None:
         """Set the number of team members."""
         self.team_count = count
+
+    def set_speculation_state(
+        self,
+        status: str,
+        boundary: str = "",
+        tool_count: int = 0,
+    ) -> None:
+        """Set speculation state for display in footer.
+
+        Args:
+            status: 'idle' or 'active'
+            boundary: Boundary type ('complete', 'edit', 'bash', 'denied_tool', '')
+            tool_count: Number of tools executed in speculation
+        """
+        self.speculation_status = status
+        self.speculation_boundary = boundary
+        self.speculation_tool_count = tool_count

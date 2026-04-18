@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from typing import Sequence, TextIO
 
@@ -10,8 +9,9 @@ from py_claw import __version__
 from py_claw.cli.control import ControlRuntime
 from py_claw.cli.runtime import RuntimeState
 from py_claw.cli.structured_io import StructuredIO, StructuredIOError
+from py_claw.config import load_config
 from py_claw.query import QueryRuntime, SdkUrlQueryBackend
-from py_claw.query.backend import AnthropicQueryBackend
+from py_claw.query.backend import ApiQueryBackend
 from py_claw.schemas.control import SDKControlRequestEnvelope, SDKControlResponseEnvelope
 from py_claw.ui.textual_app import run_textual_ui
 
@@ -59,8 +59,14 @@ def _build_state(args: argparse.Namespace) -> RuntimeState:
     state = RuntimeState(include_partial_messages=args.include_partial_messages)
     if args.sdk_url:
         state.query_backend = SdkUrlQueryBackend(args.sdk_url)
-    elif os.environ.get("ANTHROPIC_API_KEY"):
-        state.query_backend = AnthropicQueryBackend()
+    else:
+        cfg = load_config()
+        if cfg.api.is_configured():
+            state.query_backend = ApiQueryBackend(
+                api_key=cfg.api.api_key,
+                api_url=cfg.api.api_url,
+                model=cfg.api.model,
+            )
     return state
 
 

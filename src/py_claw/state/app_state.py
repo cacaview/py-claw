@@ -42,6 +42,11 @@ class TUIState:
     # Overlay state (mirrors active_overlays at AppState level for quick access)
     # Note: active_overlays is already in AppState
 
+    # Speculation state
+    speculation_status: str = "idle"  # 'idle' | 'active'
+    speculation_boundary: str = ""  # boundary type or ""
+    speculation_tool_count: int = 0
+
 
 @dataclass
 class UIState:
@@ -106,16 +111,40 @@ class SessionHooksState:
 
 
 @dataclass
+class CompletionBoundary:
+    """Boundary at which speculation stopped.
+
+    Mirrors ClaudeCode-main/src/state/AppStateStore.ts CompletionBoundary.
+    """
+    type: str = "complete"  # 'complete' | 'bash' | 'edit' | 'denied_tool'
+    tool_name: Optional[str] = None
+    file_path: Optional[str] = None
+    command: Optional[str] = None
+    detail: Optional[str] = None
+    completed_at: Optional[int] = None
+    output_tokens: Optional[int] = None
+
+
+@dataclass
 class SpeculationState:
-    """Speculation state for pipelined suggestions."""
+    """Speculation state for pipelined suggestions.
+
+    Mirrors ClaudeCode-main/src/state/AppStateStore.ts SpeculationState.
+    """
     status: str = "idle"  # 'idle' | 'active'
     id: Optional[str] = None
     start_time: Optional[int] = None
-    boundary: Optional[Any] = None
+    boundary: Optional[CompletionBoundary] = None
     suggestion_length: int = 0
     tool_use_count: int = 0
     is_pipelined: bool = False
     pipelined_suggestion: Optional[Dict[str, Any]] = None
+    # Messages accumulated during speculation
+    messages: list[Any] = field(default_factory=list)
+    # Relative paths written to overlay
+    written_paths: list[str] = field(default_factory=list)
+    # Overlay directory path for copy-on-write isolation
+    overlay_path: Optional[str] = None
 
 
 @dataclass

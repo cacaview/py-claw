@@ -119,6 +119,77 @@ class TestREPLMessageLog:
         assert messages[0].content == "warning"
 
 
+class TestREPMessageUpdate:
+    """Test update_last_message — the pattern used by streaming response."""
+
+    async def test_update_last_message_replaces_content(self, pilot, screen):
+        """update_last_message replaces the last message content."""
+        screen.append_message("assistant", "thinking...")
+        screen.update_last_message("final answer")
+        log = screen.query_one("#repl-message-log", MessageList)
+        messages = log.get_messages()
+        assert len(messages) == 1
+        assert messages[0].content == "final answer"
+
+    async def test_update_last_message_appends_when_flag_true(self, pilot, screen):
+        """update_last_message appends when append=True."""
+        screen.append_message("assistant", "part1 ")
+        screen.update_last_message("part2", append=True)
+        log = screen.query_one("#repl-message-log", MessageList)
+        messages = log.get_messages()
+        assert len(messages) == 1
+        assert messages[0].content == "part1 part2"
+
+    async def test_update_last_message_idempotent_when_empty(self, pilot, screen):
+        """update_last_message on empty log does nothing."""
+        screen.update_last_message("nothing")
+        log = screen.query_one("#repl-message-log", MessageList)
+        messages = log.get_messages()
+        assert len(messages) == 0
+
+    async def test_streaming_pattern_append_then_update(self, pilot, screen):
+        """Simulate streaming: append thinking, then update with final text."""
+        # Step 1: append thinking placeholder
+        screen.append_message("assistant", "thinking...")
+        log = screen.query_one("#repl-message-log", MessageList)
+        assert log.get_messages()[0].content == "thinking..."
+
+        # Step 2: update thinking with real result
+        screen.update_last_message("The answer is 42", append=False)
+        messages = log.get_messages()
+        assert len(messages) == 1
+        assert messages[0].content == "The answer is 42"
+
+    async def test_multiple_messages_then_update_last(self, pilot, screen):
+        """Append multiple messages, then update only the last one (the system message)."""
+        screen.append_message("user", "what is 2+2?")
+        screen.append_message("assistant", "calculating...")
+        screen.append_message("system", "tool: Bash")
+        screen.update_last_message("4")  # updates the last message (system)
+        messages = screen.query_one("#repl-message-log", MessageList).get_messages()
+        assert messages[0].content == "what is 2+2?"      # unchanged
+        assert messages[1].content == "calculating..."  # unchanged
+        assert messages[2].content == "4"                  # last updated
+
+    async def test_append_tool_progress(self, pilot, screen):
+        """append_tool_progress adds a tool message with the tool name."""
+        screen.append_tool_progress("Bash", 0.123)
+        log = screen.query_one("#repl-message-log", MessageList)
+        messages = log.get_messages()
+        assert len(messages) == 1
+        assert messages[0].role == MessageRole.TOOL
+        assert messages[0].tool_name == "Bash"
+
+    async def test_append_error(self, pilot, screen):
+        """append_error adds a system message with the error text."""
+        screen.append_error("permission denied")
+        log = screen.query_one("#repl-message-log", MessageList)
+        messages = log.get_messages()
+        assert len(messages) == 1
+        assert messages[0].role == MessageRole.SYSTEM
+        assert "permission denied" in messages[0].content
+
+
 class TestREPLResponsiveLayout:
     """Responsive narrow/short layout behavior."""
 

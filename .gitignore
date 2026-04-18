@@ -28,3 +28,5 @@ Thumbs.db
 
 # Image artifacts (from previous sessions)
 *.png
+key.txt
+.wsl-venv/

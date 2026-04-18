@@ -299,6 +299,12 @@ def _main() -> int:
     exchanges: list[dict[str, str]] = []
     turn_count = 0
 
+    # Speculation mode state
+    speculation_mode = False
+    speculation_overlay_path: str | None = None
+    speculation_main_cwd: str = cwd
+    speculation_max_turns: int = 20
+
     while True:
         msg = parser.read_message()
         if msg is None:
@@ -306,7 +312,47 @@ def _main() -> int:
 
         msg_type = msg.get("type")
 
+        if msg_type == "speculation_start":
+            # Enter speculation mode
+            speculation_mode = True
+            speculation_overlay_path = msg.get("overlay_path", "")
+            speculation_main_cwd = msg.get("main_cwd", cwd)
+            speculation_max_turns = msg.get("max_turns", 20)
+            continue
+
         if msg_type == "turn":
+            query_text = msg.get("query_text", "")
+            incoming_turn_count = msg.get("turn_count", turn_count)
+
+            if speculation_mode:
+                # Run speculation with real model execution
+                result = _handle_turn_speculation(
+                    query_text=query_text,
+                    cwd=speculation_main_cwd,
+                    overlay_path=speculation_overlay_path,
+                    model=model,
+                    max_turns=speculation_max_turns,
+                )
+                result["turn_count"] = incoming_turn_count
+                _send_result(result)
+            else:
+                result = _handle_turn_persistent(
+                    query_text=query_text,
+                    system_prompt=system_prompt,
+                    exchanges=exchanges,
+                    worktree_notice=worktree_notice,
+                )
+
+                # Accumulate in history
+                exchanges.append({
+                    "user_message": query_text,
+                    "assistant_text": result.get("assistant_text", ""),
+                })
+
+                # Echo turn_count back so parent can route result
+                result["turn_count"] = incoming_turn_count
+                _send_result(result)
+            turn_count += 1
             query_text = msg.get("query_text", "")
             incoming_turn_count = msg.get("turn_count", turn_count)
 
@@ -385,6 +431,84 @@ def _handle_turn_persistent(
             "usage": {},
             "model_usage": {},
             "tool_calls": [],
+        }
+
+
+async def _run_speculation_async(
+    query_text: str,
+    cwd: str,
+    overlay_path: str | None,
+    model: str | None,
+    max_turns: int = 20,
+) -> dict[str, Any]:
+    """Run speculation with real model and tool execution.
+
+    Uses the model_executor module for API calls and tool execution.
+    Falls back to placeholder if API is unavailable.
+    """
+    try:
+        from py_claw.fork.model_executor import run_speculation_turn
+        result = await run_speculation_turn(
+            query_text=query_text,
+            cwd=cwd,
+            overlay_path=overlay_path,
+            model=model,
+            max_turns=max_turns,
+        )
+        return result
+    except Exception as exc:
+        import sys as _sys
+        _sys.stderr.write(f"[Speculation] Model executor error: {exc}\n")
+        _sys.stderr.flush()
+        return {
+            "assistant_text": f"[Speculation error: {exc}]",
+            "stop_reason": "end_turn",
+            "usage": {},
+            "tool_calls": [],
+            "boundary": None,
+        }
+
+
+def _handle_turn_speculation(
+    query_text: str,
+    cwd: str,
+    overlay_path: str | None,
+    model: str | None,
+    max_turns: int = 20,
+) -> dict[str, Any]:
+    """Handle a speculation turn with real model execution.
+
+    Runs the async speculation turn synchronously in the subprocess.
+    """
+    import asyncio
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        result = loop.run_until_complete(
+            _run_speculation_async(
+                query_text=query_text,
+                cwd=cwd,
+                overlay_path=overlay_path,
+                model=model,
+                max_turns=max_turns,
+            )
+        )
+        return result
+    except Exception as exc:
+        import sys as _sys
+        _sys.stderr.write(f"[Speculation] Turn error: {exc}\n")
+        _sys.stderr.flush()
+        return {
+            "assistant_text": f"[Speculation turn error: {exc}]",
+            "stop_reason": "end_turn",
+            "usage": {},
+            "tool_calls": [],
+            "boundary": None,
         }
 
 

@@ -63,6 +63,18 @@ class ForkResultMessage(ForkMessage):
     usage: dict[str, object] = field(default_factory=dict)
     model_usage: dict[str, object] = field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    turn_count: int = 0
+    boundary: dict[str, object] | None = None
+    output_tokens: int = 0
+
+
+@dataclass
+class ForkSpeculationStartMessage(ForkMessage):
+    """Start speculation mode in child subprocess."""
+    type: Literal["speculation_start"] = "speculation_start"
+    overlay_path: str = ""
+    main_cwd: str = ""
+    max_turns: int = 20
 
 
 @dataclass

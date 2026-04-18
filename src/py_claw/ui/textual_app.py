@@ -176,6 +176,8 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             self._update_narrow_mode()
             if prompt:
                 self.call_after_refresh(self._submit_prompt, prompt)
+            # Register speculation state callback
+            self._register_speculation_callback()
 
         def on_resize(self, event: object) -> None:
             """Update narrow terminal class on resize."""
@@ -356,8 +358,16 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                     continue
                 if output_type == "stream_event":
                     event = getattr(output, "event", None)
-                    if getattr(event, "type", None) == "stream_request_start":
-                        self.call_from_thread(self._append_message, "assistant", "thinking...")
+                    if isinstance(event, dict):
+                        event_type = event.get("type")
+                        if event_type == "stream_request_start":
+                            self.call_from_thread(self._append_message, "assistant", "thinking...")
+                        elif event_type == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                text = delta.get("text", "")
+                                if text:
+                                    self.call_from_thread(self._update_last_message, text, True)
                     continue
                 if output_type == "tool_progress":
                     self.call_from_thread(
@@ -398,6 +408,29 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         def _handle_model_change(self, model: str) -> None:
             """Handle model change from model picker."""
             self._set_hint(f"Model: {model}")
+
+        def _register_speculation_callback(self) -> None:
+            """Register speculation state change callback with SpeculationService."""
+            try:
+                from py_claw.services.speculation import get_speculation_service
+                service = get_speculation_service()
+
+                def on_state_change(spec_state: Any) -> None:
+                    status = spec_state.status
+                    boundary = ""
+                    if spec_state.boundary is not None:
+                        boundary = spec_state.boundary.get("type", "") if hasattr(spec_state.boundary, "get") else str(spec_state.boundary)
+                    tool_count = spec_state.tool_use_count
+                    self.call_from_thread(
+                        self._screen().set_speculation_state,
+                        status,
+                        boundary,
+                        tool_count,
+                    )
+
+                service.set_state_callback(on_state_change)
+            except Exception:
+                pass  # Speculation not available
 
         def action_quit(self) -> None:
             if state.active_worktree_session:

@@ -49,6 +49,7 @@
 - `commands.py`：90+ 个 slash commands 实现（含 install-github-app、remote-env、sandbox-toggle 等）
 - `commands/init_verifiers.py`：`/init-verifiers` 命令实现
 - `cli/main.py`：`main()` 作为包脚本入口
+- `config/`：统一配置加载（`~/.config/py-claw/config.json`，XDG Base Directory 规范）
 - `__init__.py`：当前仅暴露 `__version__`，不是稳定顶层 API 聚合层
 
 ## 关键依赖与配置

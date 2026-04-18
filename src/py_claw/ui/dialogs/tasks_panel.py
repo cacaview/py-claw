@@ -101,6 +101,7 @@ class TasksPanel(Vertical):
             item_id=task.task_id,
             label=label,
             description=task.status,
+            item_index=i,
         )
 
     def action_cancel(self) -> None:

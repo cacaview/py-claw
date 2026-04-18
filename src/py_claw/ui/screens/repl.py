@@ -532,6 +532,22 @@ class REPLScreen(Vertical):
         except Exception:
             pass
 
+    def set_speculation_state(
+        self,
+        status: str,
+        boundary: str = "",
+        tool_count: int = 0,
+    ) -> None:
+        """Update speculation state in the footer and global store."""
+        footer = self.query_one("#repl-footer", PromptFooter)
+        footer.set_speculation_state(status, boundary, tool_count)
+        # Publish to global store
+        try:
+            from py_claw.state.tui_state import update_tui_speculation
+            update_tui_speculation(status=status, boundary=boundary, tool_count=tool_count)
+        except Exception:
+            pass
+
     def set_mode(self, mode: str) -> None:
         """Update the current mode (normal/plan/auto/bypass)."""
         self._current_mode = mode

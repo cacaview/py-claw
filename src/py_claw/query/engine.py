@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, Sequence
 from uuid import uuid4
 
 from py_claw.commands import CommandExecutionResult
 from py_claw.permissions.engine import PermissionEngine
-from py_claw.query.backend import BackendToolCall, BackendTurnResult, PlaceholderQueryBackend, QueryBackend
+from py_claw.query.backend import BackendChunk, StreamingQueryBackend, BackendToolCall, BackendTurnResult, PlaceholderQueryBackend, QueryBackend
 from py_claw.schemas.common import (
     EffortLevel,
     SDKAssistantMessage,
@@ -28,6 +29,30 @@ from py_claw.tools.base import ToolError, ToolPermissionError
 
 if TYPE_CHECKING:
     from py_claw.cli.runtime import RuntimeState
+
+
+class _StreamingList(Sequence[StdoutMessage]):
+    """A sequence that is both an iterator (for streaming) and indexable (for tests).
+
+    Eagerly consumes the underlying generator on construction so that any
+    side-effects (e.g. backend.run_turn() being called) happen immediately.
+    After construction, both iteration and indexing read from the cached list.
+    """
+
+    __slots__ = ("_cache",)
+
+    def __init__(self, gen: Iterator[StdoutMessage]) -> None:
+        # Immediately exhaust the generator so backend calls etc. are executed
+        self._cache: list[StdoutMessage] = list(gen)
+
+    def __iter__(self) -> Iterator[StdoutMessage]:
+        return iter(self._cache)
+
+    def __getitem__(self, index: int) -> StdoutMessage:
+        return self._cache[index]
+
+    def __len__(self) -> int:
+        return len(self._cache)
 
 
 @dataclass(slots=True)
@@ -100,8 +125,17 @@ class QueryTurnFailure(Exception):
         self.partial_outputs = list(partial_outputs or [])
 
 
+# Type for streaming turn output: either an intermediate partial message,
+# or the final (ExecutedTurn, tool_outputs) tuple.
+StreamingTurnOutput = SDKPartialAssistantMessage | tuple[ExecutedTurn, list[StdoutMessage]]
+
+
 class TurnExecutor(Protocol):
     def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn: ...
+
+    def execute_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk | BackendTurnResult]: ...
 
 
 def _resolve_query_backend(state: RuntimeState) -> QueryBackend:
@@ -116,6 +150,37 @@ class BackendTurnExecutor:
         prepared = self._apply_runtime_defaults(prepared, context)
         result = self._backend.run_turn(prepared, context)
         return self._to_executed_turn(result)
+
+    def execute_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk | BackendTurnResult]:
+        """Streaming execution that yields BackendChunk as they arrive.
+
+        After the last chunk (stop_reason), yields the completed BackendTurnResult.
+        Falls back to non-streaming if backend does not support streaming.
+        """
+        prepared = self._apply_runtime_defaults(prepared, context)
+        if isinstance(self._backend, StreamingQueryBackend):
+            chunks: list[BackendChunk] = []
+            for chunk in self._backend.run_turn_streaming(prepared, context):
+                chunks.append(chunk)
+                yield chunk
+            # Build final result from accumulated chunks
+            assistant_parts = [c.text for c in chunks if c.type == "text_delta"]
+            stop_reason = next((c.stop_reason for c in reversed(chunks) if c.type == "stop_reason"), "end_turn")
+            assistant_text = "".join(assistant_parts)
+            result = BackendTurnResult(
+                assistant_text=assistant_text,
+                stop_reason=stop_reason,
+                usage=_build_usage(prepared=prepared, assistant_text=assistant_text, backend_type="api"),
+                model_usage=_build_model_usage(prepared=prepared, assistant_text=assistant_text, total_cost_usd=0.0),
+                duration_api_ms=0.0,
+            )
+            yield result
+        else:
+            result = self._backend.run_turn(prepared, context)
+            yield BackendChunk(type="stop_reason", stop_reason=result.stop_reason)
+            yield result
 
     def replace_backend(self, backend: QueryBackend) -> None:
         self._backend = backend
@@ -182,6 +247,11 @@ class PlaceholderTurnDriver:
     def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
         return self._placeholder_executor.execute(prepared, context)
 
+    def run_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk | ExecutedTurn]:
+        return self._placeholder_executor.execute_streaming(prepared, context)
+
     def replace_placeholder_executor(self, executor: TurnExecutor) -> None:
         self._placeholder_executor = executor
 
@@ -196,6 +266,11 @@ class RuntimeTurnExecutor:
 
     def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
         return self._driver.execute(prepared, context)
+
+    def run_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk | ExecutedTurn]:
+        return self._driver.run_streaming(prepared, context)
 
     def replace_driver(self, driver: TurnDriver) -> None:
         self._driver = driver
@@ -404,9 +479,9 @@ class QueryRuntime:
         *,
         reset_session: bool,
     ) -> list[StdoutMessage]:
-        outputs.append(self._session_state_message(session_id, "idle"))
+        yield from outputs
+        yield self._session_state_message(session_id, "idle")
         self._record_turn_completion(reset_session)
-        return outputs
 
     def _build_error_outputs(
         self,
@@ -417,8 +492,9 @@ class QueryRuntime:
         reset_session: bool,
         include_request_start: bool,
         partial_outputs: list[StdoutMessage] | None = None,
+        skip_initial_state: bool = False,
     ) -> list[StdoutMessage]:
-        outputs = [self._session_state_message(session_id, "running")]
+        outputs: list[StdoutMessage] = [] if skip_initial_state else [self._session_state_message(session_id, "running")]
         if include_request_start:
             outputs.append(self._request_start_message(session_id))
         outputs.extend(partial_outputs or [])
@@ -428,7 +504,80 @@ class QueryRuntime:
     def _should_emit_request_start(self, prepared: PreparedTurn | None) -> bool:
         return bool(prepared and prepared.should_query and prepared.query_text is not None)
 
+    def _execute_turn_with_outputs_streaming(
+        self, prepared: PreparedTurn
+    ) -> Iterator[SDKPartialAssistantMessage | tuple[ExecutedTurn, list[StdoutMessage]]]:
+        """Streaming version: yields intermediate partial messages and finally (ExecutedTurn, tool_outputs).
+
+        Uses execute_streaming() if the executor supports it; falls back to the
+        synchronous execute() method otherwise.
+        """
+        previous_in_progress = self._turn_in_progress
+        self._turn_in_progress = True
+        if self._session_id is None:
+            self._session_id = str(uuid4())
+        self._active_turn_state = QueryTurnState(
+            session_id=self._session_id,
+            prepared=prepared,
+            transcript=list(self._transcript),
+        )
+        tool_outputs: list[StdoutMessage] = []
+        web_search_requests = 0
+        try:
+            for _ in range(self._MAX_TOOL_CONTINUATIONS):
+                executed: ExecutedTurn | None = None
+                # Check if the executor supports streaming
+                if hasattr(self._turn_executor, "execute_streaming"):
+                    accumulated_text = ""
+                    streaming_finished = False
+                    for item in self._turn_executor.execute_streaming(prepared, self._current_turn_context()):
+                        if isinstance(item, BackendChunk):
+                            if item.type == "text_delta":
+                                accumulated_text += item.text
+                                partial = self._partial_assistant_message(self._session_id or "", accumulated_text)
+                                if partial is not None:
+                                    yield partial
+                            elif item.type == "stop_reason":
+                                streaming_finished = True
+                        elif isinstance(item, BackendTurnResult):
+                            executed = self._to_executed_turn(item)
+                            streaming_finished = True
+
+                    if self.state.interrupt_event.is_set():
+                        raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
+
+                    if streaming_finished and executed is not None:
+                        if not executed.tool_calls:
+                            yield self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), list(tool_outputs)
+                            return
+                    else:
+                        raise QueryTurnFailure(RuntimeError("Streaming executor returned no result"), tool_outputs)
+                else:
+                    # Non-streaming fallback
+                    executed = self._turn_executor.execute(prepared, self._current_turn_context())
+                    if self.state.interrupt_event.is_set():
+                        raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
+                    if not executed.tool_calls:
+                        yield self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), list(tool_outputs)
+                        return
+
+                # Common path: executed with tool_calls
+                try:
+                    new_outputs, new_web_search = self._execute_tool_calls(prepared, executed.tool_calls)
+                    tool_outputs.extend(new_outputs)
+                    web_search_requests += new_web_search
+                except Exception as exc:
+                    raise QueryTurnFailure(exc, tool_outputs) from exc
+                self._advance_turn_state_after_tool_calls(executed.tool_calls)
+                if self.state.interrupt_event.is_set():
+                    raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
+        finally:
+            self._turn_in_progress = previous_in_progress
+            self._active_turn_state = None
+        raise QueryTurnFailure(RuntimeError("Query exceeded maximum tool continuations"), tool_outputs)
+
     def _execute_turn_with_outputs(self, prepared: PreparedTurn) -> tuple[ExecutedTurn, list[StdoutMessage]]:
+        """Synchronous version for backward compatibility."""
         previous_in_progress = self._turn_in_progress
         self._turn_in_progress = True
         if self._session_id is None:
@@ -625,17 +774,53 @@ class QueryRuntime:
         prepared: PreparedTurn,
         session_id: str,
         started: float,
-    ) -> list[StdoutMessage]:
-        outputs: list[StdoutMessage] = [self._session_state_message(session_id, "running")]
-        if self._should_emit_request_start(prepared):
-            outputs.append(self._request_start_message(session_id))
-        outputs.extend(prepared.immediate_outputs)
-        if prepared.should_query and prepared.query_text is not None:
-            executed, tool_outputs = self._execute_turn_with_outputs(prepared)
-            outputs.extend(self._build_assistant_outputs(session_id, executed, started, tool_outputs=tool_outputs))
-        return self._finalize_outputs(outputs, session_id, reset_session=prepared.should_reset_session)
+    ):
+        """Generator that yields StdoutMessage as they are produced.
 
-    def handle_user_message(self, message: SDKUserMessage) -> list[StdoutMessage]:
+        Enables streaming: intermediate tool-progress and partial-assistant
+        messages are yielded before the final result.
+        """
+        yield self._session_state_message(session_id, "running")
+        if self._should_emit_request_start(prepared):
+            yield self._request_start_message(session_id)
+        yield from prepared.immediate_outputs
+        if prepared.should_query and prepared.query_text is not None:
+            try:
+                for item in self._execute_turn_with_outputs_streaming(prepared):
+                    if isinstance(item, SDKPartialAssistantMessage):
+                        # Intermediate streaming text delta
+                        yield item
+                    else:
+                        # Final (ExecutedTurn, tool_outputs)
+                        executed, tool_outputs = item
+                        yield from self._build_assistant_outputs(
+                            session_id, executed, started, tool_outputs=tool_outputs
+                        )
+            except QueryTurnFailure as exc:
+                # We have already yielded session_state(running) and request_start.
+                # Tell _build_error_outputs to skip the initial state to avoid duplication.
+                yield from self._build_error_outputs(
+                    session_id,
+                    exc.error,
+                    started,
+                    reset_session=False,
+                    include_request_start=False,
+                    partial_outputs=exc.partial_outputs,
+                    skip_initial_state=True,
+                )
+                return  # terminates generator — StopIteration propagates to caller
+        yield from self._finalize_outputs([], session_id, reset_session=prepared.should_reset_session)
+
+    def handle_user_message(self, message: SDKUserMessage) -> _StreamingList:
+        """Returns a lazy streaming list of messages.
+
+        Iterating over the result yields messages as they are produced
+        (intermediate tool-progress, partial-assistant, and final results).
+        Indexing the result materialises the underlying generator on demand.
+        """
+        return _StreamingList(self._handle_user_message_gen(message))
+
+    def _handle_user_message_gen(self, message: SDKUserMessage) -> Iterator[StdoutMessage]:
         started = perf_counter()
         session_id = self._ensure_session_id(message.session_id)
         settings = self._load_settings()
@@ -646,18 +831,20 @@ class QueryRuntime:
 
         try:
             prepared = self._prepare_turn(normalized_user, settings, session_id)
-            return self._execute_prepared_turn(prepared, session_id, started)
-        except QueryTurnFailure as exc:
-            return self._build_error_outputs(
-                session_id,
-                exc.error,
-                started,
-                reset_session=False,
-                include_request_start=self._should_emit_request_start(prepared),
-                partial_outputs=exc.partial_outputs,
-            )
+            generator = self._execute_prepared_turn(prepared, session_id, started)
+            try:
+                yield from generator
+            except StopIteration:
+                # Normal completion
+                pass
+            except RuntimeError:
+                # Python 3.7+: StopIteration raised inside a generator propagates
+                # as RuntimeError through yield from.
+                pass
         except Exception as exc:
-            return self._build_error_outputs(
+            # Only reached if _prepare_turn or the outer try block raises
+            # before yielding anything from the inner generator.
+            yield from self._build_error_outputs(
                 session_id,
                 exc,
                 started,

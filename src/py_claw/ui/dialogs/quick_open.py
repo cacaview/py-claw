@@ -181,6 +181,7 @@ class QuickOpenDialog(Vertical):
                     item_id=file_path,
                     label=f"[{color}]{prefix} {display}[/]",
                     description=str(Path(file_path).parent) if len(display) > 50 else "",
+                    item_index=i,
                 )
             )
 

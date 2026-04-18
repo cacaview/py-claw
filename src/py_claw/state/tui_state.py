@@ -30,6 +30,9 @@ class TUIStateSnapshot:
     pasted_content_label: Optional[str] = None
     narrow_terminal: bool = False
     active_overlays: frozenset = frozenset()
+    speculation_status: str = "idle"
+    speculation_boundary: str = ""
+    speculation_tool_count: int = 0
 
 
 class TUIStateSubscriber:
@@ -162,6 +165,22 @@ def remove_active_overlay(overlay_id: str) -> None:
     store.update(lambda s: _with_overlay_remove(s, overlay_id))
 
 
+def update_tui_speculation(
+    status: str,
+    boundary: str = "",
+    tool_count: int = 0,
+) -> None:
+    """Update speculation state in the global store."""
+    store = get_global_store()
+    def updater(s: Any) -> Any:
+        def inner(t: Any) -> None:
+            t.speculation_status = status
+            t.speculation_boundary = boundary
+            t.speculation_tool_count = tool_count
+        return _with_tui(s, inner)
+    store.update(updater)
+
+
 # ─── Internal helpers ──────────────────────────────────────────────────────
 
 
@@ -181,6 +200,9 @@ def _get_tui_snapshot(state: Any) -> TUIStateSnapshot:
         pasted_content_label=tui.pasted_content_label,
         narrow_terminal=tui.narrow_terminal,
         active_overlays=frozenset(state.active_overlays),
+        speculation_status=tui.speculation_status,
+        speculation_boundary=tui.speculation_boundary,
+        speculation_tool_count=tui.speculation_tool_count,
     )
 
 

@@ -4059,14 +4059,16 @@ def _diff_handler(
         ["git", "diff", "--cached"],
         cwd=cwd,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     unstaged_result = subprocess.run(
         ["git", "diff"],
         cwd=cwd,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -4192,10 +4194,13 @@ def _insights_handler(
     if result.sessions is not None and len(result.sessions) == 0:
         return _insights_empty()
 
-    if export_json:
-        return format_insights_report(result, fmt="json")
+    # format_insights_report is available from the lazy import inside _run_insights_pipeline
+    from py_claw.services.insights import format_insights_report as _format_report
 
-    text = format_insights_report(result, fmt="text")
+    if export_json:
+        return _format_report(result, fmt="json")
+
+    text = _format_report(result, fmt="text")
     if open_browser:
         path = write_html_insights(result)
         try:

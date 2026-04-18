@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+import httpx
 
 _logger = logging.getLogger(__name__)
 
@@ -36,8 +38,25 @@ class BackendTurnResult:
     prompt_suggestion: str | None = None
 
 
+@dataclass(slots=True)
+class BackendChunk:
+    """A single chunk yielded during a streaming turn."""
+    type: str  # 'text_delta' | 'stop_reason' | 'done'
+    text: str = ""
+    stop_reason: str = "end_turn"
+
+
 class QueryBackend(Protocol):
     def run_turn(self, prepared: PreparedTurn, context: QueryTurnContext) -> BackendTurnResult: ...
+
+
+class StreamingQueryBackend(Protocol):
+    """A query backend that supports yielding streaming chunks before the final result."""
+
+    def run_turn_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk]:
+        ...
 
 
 def _estimate_tokens(text: str | None) -> int:
@@ -371,6 +390,182 @@ class SdkUrlQueryBackend:
         return _sdk_backend_request(prepared, context, self.sdk_url)
 
 
+class ApiQueryBackend:
+    """Query backend for OpenAI/API-compatible endpoints.
+
+    Uses streaming SSE at the configured api_url.
+    Configure via ApiConfig passed from py_claw.config.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        api_url: str,
+        model: str | None = None,
+        max_output_tokens: int = 8192,
+    ) -> None:
+        self._api_key = api_key
+        self._api_url = api_url
+        self._model = model or "gpt-5.4"
+        self._max_output_tokens = max_output_tokens
+
+    def run_turn(self, prepared: PreparedTurn, context: QueryTurnContext) -> BackendTurnResult:
+        return _api_request(prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url)
+
+    def run_turn_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk]:
+        return _api_request_streaming(
+            prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url
+        )
+
+
+def _parse_sse_stream(sse_text: str) -> tuple[str, str]:
+    """Parse SSE-formatted text into assistant content and stop reason.
+
+    Handles OpenAI Responses API SSE format with event lines prefixed by "data:".
+    Returns (assistant_text, stop_reason).
+    """
+    assistant_parts: list[str] = []
+    stop_reason = "end_turn"
+
+    for line in sse_text.split("\n"):
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:])
+        except json.JSONDecodeError:
+            continue
+        event_type = event.get("type")
+        if event_type == "content_block_delta":
+            delta = event.get("delta", {})
+            if delta.get("type") == "text_delta":
+                assistant_parts.append(delta.get("text", ""))
+        elif event_type == "message_stop":
+            msg = event.get("message", {})
+            stop_reason = msg.get("stop_reason") or "end_turn"
+
+    return "".join(assistant_parts), stop_reason
+
+
+def _api_request(
+    prepared: PreparedTurn,
+    context: QueryTurnContext,
+    model: str,
+    max_output_tokens: int,
+    api_key: str,
+    api_url: str,
+) -> BackendTurnResult:
+    """Call OpenAI/API-compatible /v1/messages with streaming SSE, parse into BackendTurnResult."""
+    messages: list[dict[str, str]] = _transcript_to_messages(context.transcript)
+    if prepared.query_text:
+        messages.append({"role": "user", "content": prepared.query_text})
+
+    system_parts: list[str] = []
+    if prepared.system_prompt:
+        system_parts.append(prepared.system_prompt)
+    if prepared.append_system_prompt:
+        system_parts.append(prepared.append_system_prompt)
+    system = "\n\n".join(system_parts) if system_parts else None
+
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_output_tokens,
+        "stream": True,
+    }
+    if system:
+        body["system"] = system
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+
+    try:
+        with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(f"Right codes API returned HTTP {resp.status_code}: {resp.text[:200]}")
+            text = resp.text
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Right codes API request failed: {exc}") from exc
+
+    # Parse SSE stream
+    assistant_text, stop_reason = _parse_sse_stream(text)
+
+    return BackendTurnResult(
+        assistant_text=assistant_text,
+        stop_reason=stop_reason,
+        usage=_build_usage(prepared=prepared, assistant_text=assistant_text, backend_type="api"),
+        model_usage=_build_model_usage(prepared=prepared, assistant_text=assistant_text, total_cost_usd=0.0),
+        duration_api_ms=0.0,
+    )
+
+
+def _api_request_streaming(
+    prepared: PreparedTurn,
+    context: QueryTurnContext,
+    model: str,
+    max_output_tokens: int,
+    api_key: str,
+    api_url: str,
+) -> Iterator[BackendChunk]:
+    """Generator that yields BackendChunk as SSE data arrives."""
+    messages: list[dict[str, str]] = _transcript_to_messages(context.transcript)
+    if prepared.query_text:
+        messages.append({"role": "user", "content": prepared.query_text})
+
+    system_parts: list[str] = []
+    if prepared.system_prompt:
+        system_parts.append(prepared.system_prompt)
+    if prepared.append_system_prompt:
+        system_parts.append(prepared.append_system_prompt)
+    system = "\n\n".join(system_parts) if system_parts else None
+
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_output_tokens,
+        "stream": True,
+    }
+    if system:
+        body["system"] = system
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+
+    try:
+        with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(f"Right codes API returned HTTP {resp.status_code}: {resp.text[:200]}")
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:])
+                except json.JSONDecodeError:
+                    continue
+                event_type = event.get("type")
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            yield BackendChunk(type="text_delta", text=text)
+                elif event_type == "message_stop":
+                    msg = event.get("message", {})
+                    stop_reason = msg.get("stop_reason") or "end_turn"
+                    yield BackendChunk(type="stop_reason", stop_reason=stop_reason)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Right codes API request failed: {exc}") from exc
+
+
 class AnthropicQueryBackend:
     """Query backend that calls the Anthropic API directly.
 
@@ -381,11 +576,11 @@ class AnthropicQueryBackend:
 
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key: str,
         model: str | None = None,
         max_output_tokens: int = 8192,
     ) -> None:
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self._api_key = api_key
         self._model = model
         self._max_output_tokens = max_output_tokens
         self._client: "AnthropicClient | None" = None
@@ -404,11 +599,14 @@ class AnthropicQueryBackend:
         from py_claw.services.api.client import AnthropicClient
 
         # Build messages from transcript
-        messages = _transcript_to_messages(context.transcript)
+        dict_messages = _transcript_to_messages(context.transcript)
 
         # Add the current query as a user message
         if prepared.query_text:
-            messages.append(MessageParam(role="user", content=prepared.query_text))
+            dict_messages.append({"role": "user", "content": prepared.query_text})
+
+        # Convert to MessageParam for the API client
+        messages = [MessageParam(role=m["role"], content=m["content"]) for m in dict_messages]
 
         # Determine model
         model = prepared.model or self._model or "claude-sonnet-4-20250514"
@@ -469,21 +667,19 @@ class AnthropicQueryBackend:
         )
 
 
-def _transcript_to_messages(transcript: list[object]) -> list["MessageParam"]:
-    """Convert transcript objects to API message params."""
-    from py_claw.services.api import MessageParam
-
-    messages: list[MessageParam] = []
+def _transcript_to_messages(transcript: list[object]) -> list[dict[str, str]]:
+    """Convert transcript objects to plain dict messages for JSON serialization."""
+    messages: list[dict[str, str]] = []
     for item in transcript:
         role = getattr(item, "type", None)
         if role == "user" or getattr(item, "role", None) == "user":
             content = _extract_message_content(item)
             if content:
-                messages.append(MessageParam(role="user", content=content))
+                messages.append({"role": "user", "content": content})
         elif role == "assistant" or getattr(item, "role", None) == "assistant":
             content = _extract_assistant_content(item)
             if content:
-                messages.append(MessageParam(role="assistant", content=content))
+                messages.append({"role": "assistant", "content": content})
     return messages
 
 

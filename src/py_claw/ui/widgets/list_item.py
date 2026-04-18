@@ -19,14 +19,20 @@ from py_claw.ui.theme import get_theme
 from py_claw.ui.widgets.themed_text import ThemedText
 
 
-def _sanitize_item_id(item_id: str) -> str:
-    """Convert arbitrary item ids into Textual-safe widget ids."""
+def _sanitize_item_id(item_id: str, index: int | None = None) -> str:
+    """Convert arbitrary item ids into Textual-safe widget ids.
+
+    Adds an optional numeric index suffix to prevent collisions when the same
+    item_id is used multiple times within a dialog.
+    """
     sanitized = re.sub(r"[^A-Za-z0-9_-]", "-", item_id)
     sanitized = sanitized.strip("-")
     if not sanitized:
         sanitized = "item"
     if sanitized[0].isdigit():
         sanitized = f"item-{sanitized}"
+    if index is not None:
+        sanitized = f"{sanitized}-{index}"
     return sanitized
 
 
@@ -58,6 +64,7 @@ class ListItem(Horizontal):
         *,
         id: str | None = None,
         classes: str | None = None,
+        item_index: int | None = None,
     ) -> None:
         self.item_id = item_id
         self._label = label
@@ -65,7 +72,10 @@ class ListItem(Horizontal):
         self._icon = icon
         self._selected = selected
         self._on_click = on_click
-        super().__init__(id=id or f"list-item-{_sanitize_item_id(item_id)}", classes=classes)
+        super().__init__(
+            id=id if id is not None else f"list-item-{_sanitize_item_id(item_id, item_index)}",
+            classes=classes,
+        )
 
     def on_mount(self) -> None:
         """Apply styling based on state."""

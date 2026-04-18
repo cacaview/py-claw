@@ -2670,3 +2670,99 @@ def test_structured_io_can_parse_user_message_directly() -> None:
 
     assert isinstance(message, SDKUserMessage)
     assert message.type == "user"
+
+
+class TestApiQueryBackendStreaming:
+    """Test SSE streaming parsing in ApiQueryBackend — verifies streaming response handling."""
+
+    def test_parse_sse_stream_parses_single_text_delta(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello world\"}}\n"
+        text, reason = _parse_sse_stream(sse)
+        assert text == "hello world"
+        assert reason == "end_turn"
+
+    def test_parse_sse_stream_parses_multiple_text_deltas(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = (
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n"
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n"
+        )
+        text, reason = _parse_sse_stream(sse)
+        assert text == "hello world"
+        assert reason == "end_turn"
+
+    def test_parse_sse_stream_parses_message_stop_with_reason(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = (
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n"
+            "data:{\"type\":\"message_stop\",\"message\":{\"stop_reason\":\"end_turn\"}}\n"
+        )
+        text, reason = _parse_sse_stream(sse)
+        assert text == "done"
+        assert reason == "end_turn"
+
+    def test_parse_sse_stream_parses_stop_reason_tool_use(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = (
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"using tool\"}}\n"
+            "data:{\"type\":\"message_stop\",\"message\":{\"stop_reason\":\"tool_use\"}}\n"
+        )
+        text, reason = _parse_sse_stream(sse)
+        assert text == "using tool"
+        assert reason == "tool_use"
+
+    def test_parse_sse_stream_ignores_non_data_lines(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = (
+            "event: message\n"
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n"
+            "\n"
+        )
+        text, reason = _parse_sse_stream(sse)
+        assert text == "hello"
+        assert reason == "end_turn"
+
+    def test_parse_sse_stream_ignores_malformed_json_lines(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = (
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n"
+            "data:not valid json\n"
+        )
+        text, reason = _parse_sse_stream(sse)
+        assert text == "hello"
+        assert reason == "end_turn"
+
+    def test_parse_sse_stream_ignores_non_text_delta_types(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = (
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"text\":\"some json\"}}\n"
+            "data:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"visible\"}}\n"
+        )
+        text, reason = _parse_sse_stream(sse)
+        assert text == "visible"
+        assert reason == "end_turn"
+
+    def test_parse_sse_stream_empty_stream_returns_empty_text(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = ""
+        text, reason = _parse_sse_stream(sse)
+        assert text == ""
+        assert reason == "end_turn"
+
+    def test_parse_sse_stream_no_stop_reason_defaults_to_end_turn(self) -> None:
+        from py_claw.query.backend import _parse_sse_stream
+
+        sse = "data:{\"type\":\"message_stop\"}\n"
+        text, reason = _parse_sse_stream(sse)
+        assert text == ""
+        assert reason == "end_turn"
+

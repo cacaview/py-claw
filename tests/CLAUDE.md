@@ -78,4 +78,6 @@
 
 ## 变更记录 (Changelog)
 
+- 2026-04-18：TUI + SSE 流式测试补全 — `tests/test_tui_smoke.py`（4 测试）Smoke test：`PyClawApp` 真实挂载/输入提交/help/history；`tests/test_cli_and_schemas.py::TestApiQueryBackendStreaming`（9 测试）SSE 解析覆盖——单/多 text_delta、message_stop stop_reason、非数据行过滤、畸形 JSON 跳过；总计 1853 测试通过（+13）；`todo.md` item 10 标记 ✅，剩余 TTY 缺口已文档化；`py_claw/config/` 新增统一配置加载（`~/.config/py-claw/config.json`），移除 `RIGHT_CODES_API_KEY`/`ANTHROPIC_API_KEY` 环境变量回退；`PY_CLAW_CONFIG_PATH` 用于测试隔离
+- 2026-04-18：TUI 自动化测试基础设施完成 — `tests/test_tui/`（68 测试）覆盖 PromptInput/PromptFooter/REPLScreen/overlays/suggestions/compact layout；`tests/test_typeahead.py`（43 测试）覆盖 SuggestionEngine/CommandItem/Suggestion types；`tests/test_tui_textual.py` 基本 async mount 测试；`tests/test_cli_tui.py`（18 新增测试）覆盖 CLI 入口、overlay 打开关闭、prompt 生命周期、compact layout、mutual exclusivity；`ListItem` 重名 ID bug 修复（`_sanitize_item_id` 增加 `index` 参数）；总计 111+18=129 个 TUI 测试通过；TUI 调试工作流 `TUI_DEBUG_WORKFLOW.md` 已同步更新，移除已解决的 `session_storage.flush_session_storage` 问题
 - 2026-04-08：补全文档，纳入 tools/hooks/mcp 测试与 `conftest.py`。

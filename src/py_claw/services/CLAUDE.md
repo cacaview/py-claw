@@ -51,6 +51,7 @@
 - `bridge/` — Bridge 远程控制服务（S7-S23 补充模块：peer_sessions、poll_config、flush_gate、capacity_wake、debug_utils、work_secret、session_id_compat、bridge_pointer、bridge_status_util、repl_bridge_handle、repl_bridge_transport、inbound_messages、inbound_attachments、env_less_bridge_config）
 - `remote/` — CCR 远程会话管理（RemoteSessionManager、SessionsWebSocket、message_adapter、permission_bridge）
 - `worktree/` — Agent worktree 管理（createAgentWorktree/removeAgentWorktree/cleanupStaleAgentWorktrees）
+- `speculation/` — 推测执行引擎（forked agent overlay 执行、copy-on-write 隔离、accept/abort 边界）
 - `model/` — 模型选择、别名解析、API provider 检测（U11）
 - `permissions/` — Auto mode 状态、分类器决策、路径验证（U12）
 - `telemetry/` — OpenTelemetry 事件日志（U13）
@@ -64,7 +65,7 @@
 
 ## 变更记录 (Changelog)
 
-- 2026-04-15：深化 `insights/` 管道，实现 Phase A-H 完整多阶段分析链（session scan、meta 提取、branch dedup、facet cache、aggregate、multi-clauding detection、narrative generation stub），数据源切换至 `session_storage/`；新增 `tests/test_services_insights.py`（21 个测试全部通过）
+- 2026-04-18：新增 `speculation/` 模块，实现推测执行引擎（SpeculationService、OverlayManager、tengu_speculation analytics）；ForkedAgentProcess 增加 `start_speculation()` fire-and-forget 方法；Fork 协议增加 `turn_count`/`boundary`/`output_tokens` 字段和 `ForkSpeculationStartMessage`；`tui_state.py` / `prompt_footer.py` / `repl.py` 增加 speculation 状态展示与同步
 - 2026-04-15：新增 `worktree/` 模块，实现 Agent worktree 管理（createAgentWorktree/removeAgentWorktree/cleanupStaleAgentWorktrees），包含 ephemeral slug 模式匹配和 stale worktree 清理功能
 - 2026-04-14：新增 `install_github_app/` 模块，实现 GitHub Actions 集成（使用 gh CLI 与 GitHub API 创建 workflow 和 PR）
 - 2026-04-14：新增 `remote/` 模块，实现 CCR 远程会话管理（RemoteSessionManager、SessionsWebSocket、message_adapter、permission_bridge），P0 核心功能缺口已补充

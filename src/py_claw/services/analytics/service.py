@@ -106,6 +106,11 @@ DEFAULT_GATES: list[FeatureGate] = [
         default_value=True,
         description="Enable git worktree isolation for agents",
     ),
+    FeatureGate(
+        name="tengu_speculation_enabled",
+        default_value=False,
+        description="Enable speculation/pipelined suggestions",
+    ),
 ]
 
 

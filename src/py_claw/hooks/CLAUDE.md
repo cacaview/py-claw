@@ -70,7 +70,13 @@
 会。`runtime.py` 已实现命令型 hook 执行器，并会在工具生命周期与权限请求阶段被调用。
 
 ### 所有 hook 类型都已执行化了吗？
-没有。当前确认真正执行的是 command hook；`prompt`、`http`、`agent` 仍主要停留在 schema 层。
+大部分是。当前确认真正执行的是 command hook；`prompt`、`http`、`agent` 仍主要停留在 schema 层。27 个事件（PreToolUse/PostToolUse/PostToolUseFailure/PermissionRequest/PermissionDenied/Elicitation/ElicitationResult/WorktreeCreate/WorktreeRemove/CwdChanged/Notification/UserPromptSubmit/SessionStart/SessionEnd/Stop/StopFailure/SubagentStart/SubagentStop/PreCompact/PostCompact/TeammateIdle/TaskCreated/TaskCompleted/ConfigChange/InstructionsLoaded/FileChanged/Setup）全部已对接 command 执行器。
+
+### `async: True` 是如何工作的？
+`async_=True` 的 hook 在 daemon thread 中执行，fire-and-forget——立即返回 `exit_code=-1`，不阻塞主流程。`asyncRewake` 机制（exit_code=2 时触发 queue wake）尚未实现。
+
+### 当前主要缺口是什么？
+`asyncRewake` 的 queue wake 集成（exit_code=2 检测 + `useQueueProcessor` 等效机制）；`prompt`/`http`/`agent` hook 类型的执行器。
 
 ## 相关文件清单
 
@@ -80,4 +86,4 @@
 
 ## 变更记录 (Changelog)
 
-- 2026-04-08：补全文档，修正“只有 schema、没有执行器”的过时结论。
+- 2026-04-18：Hook 深度补全完成 — `HookRuntime` 实现 27 个 `run_*` 方法覆盖全部 hook 事件；`async_=True` 在 daemon thread 中执行（fire-and-forget，返回 `exit_code=-1`）；完整的 structured JSON output 解析；matcher + `if` 条件过滤；bash/powershell shell 选择；37 个 hook 测试全部通过；`asyncRewake` 机制（exit_code=2 → queue wake）已识别但尚未实现

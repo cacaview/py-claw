@@ -123,12 +123,14 @@ state/
 | `update_tui_prompt_mode()` | 发布 prompt mode 变更 |
 | `update_tui_vim_mode()` | 发布 vim mode 变更 |
 | `update_tui_suggestions()` | 发布 suggestion 状态变更 |
+| `update_tui_speculation()` | 发布 speculation 状态（status/boundary/tool_count） |
 | `update_tui_prompt_value()` | 发布当前 prompt 值 |
 | `queue_prompt()` / `dequeue_prompt()` | 队列命令管理 |
 | `stash_prompt()` | 暂存当前 prompt |
 | `set_pasted_content()` | 设置粘贴内容标识 |
 | `set_narrow_terminal()` | 设置窄终端模式 |
 | `add_active_overlay()` / `remove_active_overlay()` | overlay 状态同步 |
+| `update_tui_speculation()` | 发布 speculation 状态（status/boundary/tool_count） |
 
 ### Observers (observers.py)
 
