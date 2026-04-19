@@ -67,6 +67,8 @@ class BridgeCoreParams:
     branch: str | None = None
     permission_mode: str | None = None
     machine_name: str | None = None
+    worker_type: str = "claude_code"
+    dir_path: str | None = None
 
     # Callbacks
     on_message: Callable[[dict[str, Any]], None] | None = None
@@ -92,6 +94,7 @@ class BridgeCore:
     params: BridgeCoreParams
     config: BridgeConfig
     bridge_session_id: str | None = None
+    environment_secret: str | None = None
     state: BridgeState = BridgeState.DISCONNECTED
     created_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -134,6 +137,14 @@ class BridgeCore:
                 access_token=self.params.access_token,
             )
 
+            # Register environment
+            reg_result = await self._register_environment()
+            if not reg_result:
+                self.set_state(BridgeState.FAILED, "environment registration failed")
+                return False
+
+            self.environment_secret = reg_result.get("environment_secret")
+
             # Create session
             result = await self._create_session()
             if not result.success or not result.session_id:
@@ -158,6 +169,24 @@ class BridgeCore:
             logger.error("Bridge initialization failed: %s", e)
             self.set_state(BridgeState.FAILED, str(e))
             return False
+
+    async def _register_environment(self) -> dict[str, Any] | None:
+        """Register this bridge with the CCR environment.
+
+        Returns:
+            Registration result with environment_secret on success
+        """
+        if not self._api_client:
+            return None
+
+        return await self._api_client.register_bridge_environment(
+            environment_id=self.params.environment_id,
+            worker_type=self.params.worker_type if hasattr(self.params, 'worker_type') else "claude_code",
+            machine_name=self.params.machine_name,
+            git_repo_url=self.params.git_repo_url,
+            branch=self.params.branch,
+            dir_path=getattr(self.params, 'dir_path', None),
+        )
 
     async def _create_session(self) -> CreateSessionResult:
         """Create the bridge session via API."""
@@ -200,7 +229,7 @@ class BridgeCore:
 
                 # Process messages
                 for msg in messages:
-                    self._handle_message(msg)
+                    await self._handle_message_async(msg)
 
                 # Adaptive poll interval
                 self._poll_interval = min(
@@ -224,12 +253,22 @@ class BridgeCore:
         if not self._api_client or not self.bridge_session_id:
             return []
 
-        # In full implementation:
-        # GET /v1/sessions/{id}/poll?since={sequence}
-        # Returns messages since last poll
+        # Check if we have environment_secret (set during initialize)
+        if not self.environment_secret:
+            logger.warning("No environment_secret available for polling")
+            return []
 
-        # For now, return empty
-        return []
+        # Poll for work from CCR
+        work_item = await self._api_client.poll_for_work(
+            environment_id=self.params.environment_id,
+            environment_secret=self.environment_secret,
+        )
+
+        if not work_item:
+            return []
+
+        # Return as a list of messages to process
+        return [work_item]
 
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeat to keep connection alive."""
@@ -254,6 +293,66 @@ class BridgeCore:
         # POST /v1/sessions/{id}/ping
 
         return True
+
+    async def _handle_message_async(self, msg: dict[str, Any]) -> None:
+        """Handle an incoming message asynchronously.
+
+        For work items, this will:
+        1. Parse the work secret
+        2. Spawn a child CLI process via SessionSpawner
+        3. Acknowledge the work item
+        """
+        work_type = msg.get("type")
+        work_id = msg.get("id")
+
+        if work_type == "work" and work_id:
+            await self._handle_work_item(msg)
+        elif self.params.on_message:
+            try:
+                self.params.on_message(msg)
+            except Exception as e:
+                logger.error("Message handler error: %s", e)
+
+    async def _handle_work_item(self, work_item: dict[str, Any]) -> None:
+        """Handle a work item from CCR.
+
+        Args:
+            work_item: The work item from poll response
+        """
+        work_id = work_item.get("id")
+        if not work_id:
+            return
+
+        logger.info("Received work item: id=%s", work_id)
+
+        # Extract session ingress token from decoded secret
+        decoded_secret = work_item.get("_decoded_secret", {})
+        session_ingress_token = decoded_secret.get("session_ingress_token")
+
+        if not session_ingress_token:
+            logger.error("Work item missing session_ingress_token")
+            return
+
+        # Acknowledge the work item to claim it
+        ack_ok = await self._api_client.acknowledge_work(
+            environment_id=self.params.environment_id,
+            work_id=work_id,
+            session_token=session_ingress_token,
+        )
+
+        if not ack_ok:
+            logger.warning("Failed to acknowledge work item: %s", work_id)
+            # Don't spawn - let it be re-queued
+            return
+
+        logger.info("Acknowledged work item: %s", work_id)
+
+        # Notify via callback that work item was received
+        if self.params.on_message:
+            try:
+                self.params.on_message(work_item)
+            except Exception as e:
+                logger.error("Work item message handler error: %s", e)
 
     def _handle_message(self, msg: dict[str, Any]) -> None:
         """Handle an incoming message."""

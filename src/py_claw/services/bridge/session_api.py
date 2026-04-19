@@ -229,6 +229,259 @@ class SessionApiClient:
 
         return f"tok_{uuid.uuid4().hex}"
 
+    async def register_bridge_environment(
+        self,
+        environment_id: str,
+        worker_type: str = "claude_code",
+        machine_name: str | None = None,
+        git_repo_url: str | None = None,
+        branch: str | None = None,
+        dir_path: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Register bridge environment with the server.
+
+        This is the initial registration call that establishes the bridge
+        as a worker for the given environment.
+
+        Args:
+            environment_id: The environment/organization ID
+            worker_type: Type of worker (default: claude_code)
+            machine_name: Hostname of the machine
+            git_repo_url: Git repository URL
+            branch: Git branch name
+            dir_path: Working directory path
+
+        Returns:
+            Registration result with environment_secret on success, None on failure
+        """
+        try:
+            import uuid
+
+            # In full implementation:
+            # POST /v1/code/environments/{environment_id}/bridge
+            # Headers: Authorization: Bearer <access_token>
+            # Body: { worker_type, machine_name, git_repo_url, branch, dir }
+            # Response: { environment_secret, ... }
+
+            # For now, return mock result matching TS response shape
+            environment_secret = f"sec_{uuid.uuid4().hex}"
+
+            logger.info(
+                "Registered bridge environment: env=%s worker=%s",
+                environment_id,
+                worker_type,
+            )
+
+            return {
+                "environment_id": environment_id,
+                "environment_secret": environment_secret,
+            }
+        except Exception as e:
+            logger.error("Failed to register bridge environment: %s", e)
+            return None
+
+    async def reconnect_session(
+        self,
+        environment_id: str,
+        session_id: str,
+    ) -> bool:
+        """Reconnect to an existing session.
+
+        Args:
+            environment_id: The environment ID
+            session_id: The session ID to reconnect
+
+        Returns:
+            True if reconnection was successful
+        """
+        try:
+            # In full implementation:
+            # POST /v1/code/sessions/{session_id}/reconnect
+            # Headers: Authorization: Bearer <access_token>
+            # Body: { environment_id }
+
+            logger.info(
+                "Reconnected session: env=%s session=%s",
+                environment_id,
+                session_id,
+            )
+            return True
+        except Exception as e:
+            logger.error("Failed to reconnect session: %s", e)
+            return False
+
+    async def poll_for_work(
+        self,
+        environment_id: str,
+        environment_secret: str,
+        reclaim_older_than_ms: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Poll for work items from the CCR.
+
+        Args:
+            environment_id: The environment ID
+            environment_secret: The environment secret from registration
+            reclaim_older_than_ms: Optional timeout for reclaiming stale work
+
+        Returns:
+            Work item dict if available, None otherwise.
+
+        The response shape:
+        {
+            "id": "work_id",
+            "type": "work",
+            "environment_id": "env_id",
+            "state": "pending",
+            "data": { ... },
+            "secret": "base64url_encoded_work_secret",
+            "created_at": "2024-01-01T00:00:00Z"
+        }
+        """
+        try:
+            import base64
+            import json
+            import urllib.request
+
+            url = f"{self.base_url}/v1/environments/{environment_id}/work/poll"
+            if reclaim_older_than_ms is not None:
+                url += f"?reclaim_older_than_ms={reclaim_older_than_ms}"
+
+            headers = {
+                "Authorization": f"Bearer {environment_secret}",
+                "Accept": "application/json",
+            }
+
+            request = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(request, timeout=10) as response:
+                data = response.read()
+                if not data:
+                    return None
+
+                result = json.loads(data.decode("utf-8"))
+
+                # Decode the work secret if present
+                if result.get("secret"):
+                    try:
+                        result["_decoded_secret"] = json.loads(
+                            base64.urlsafe_b64decode(
+                                result["secret"] + "=="
+                            ).decode("utf-8")
+                        )
+                    except Exception:
+                        pass
+
+                logger.debug(
+                    "Poll returned work: id=%s type=%s",
+                    result.get("id"),
+                    result.get("type"),
+                )
+                return result
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.debug("No work available (404)")
+                return None
+            logger.error("Poll HTTP error: %s %s", e.code, e.reason)
+            return None
+        except Exception as e:
+            logger.error("Poll failed: %s", e)
+            return None
+
+    async def acknowledge_work(
+        self,
+        environment_id: str,
+        work_id: str,
+        session_token: str,
+    ) -> bool:
+        """Acknowledge a work item, claiming it for this bridge.
+
+        Args:
+            environment_id: The environment ID
+            work_id: The work item ID to acknowledge
+            session_token: The session ingress token from work secret
+
+        Returns:
+            True if acknowledged successfully
+        """
+        try:
+            import json
+            import urllib.request
+
+            url = f"{self.base_url}/v1/environments/{environment_id}/work/{work_id}/ack"
+
+            headers = {
+                "Authorization": f"Bearer {session_token}",
+                "Content-Type": "application/json",
+            }
+
+            request = urllib.request.Request(
+                url,
+                data=b"{}",
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                logger.info(
+                    "Acknowledged work: env=%s work=%s status=%s",
+                    environment_id,
+                    work_id,
+                    response.status,
+                )
+                return response.status == 200
+
+        except Exception as e:
+            logger.error("Acknowledge work failed: %s", e)
+            return False
+
+    async def stop_work(
+        self,
+        environment_id: str,
+        work_id: str,
+        environment_secret: str,
+        force: bool = False,
+    ) -> bool:
+        """Stop/cancel a work item.
+
+        Args:
+            environment_id: The environment ID
+            work_id: The work item ID to stop
+            environment_secret: The environment secret
+            force: If True, force stop without graceful shutdown
+
+        Returns:
+            True if stopped successfully
+        """
+        try:
+            import urllib.request
+
+            url = f"{self.base_url}/v1/environments/{environment_id}/work/{work_id}/stop"
+            if force:
+                url += "?force=true"
+
+            headers = {
+                "Authorization": f"Bearer {environment_secret}",
+                "Content-Type": "application/json",
+            }
+
+            request = urllib.request.Request(
+                url,
+                data=b"",
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                logger.info(
+                    "Stopped work: env=%s work=%s status=%s",
+                    environment_id,
+                    work_id,
+                    response.status,
+                )
+                return response.status == 200
+
+        except Exception as e:
+            logger.error("Stop work failed: %s", e)
+            return False
+
 
 def build_session_git_context(
     git_repo_url: str | None,

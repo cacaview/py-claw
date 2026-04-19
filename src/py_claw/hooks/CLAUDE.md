@@ -73,10 +73,10 @@
 大部分是。当前确认真正执行的是 command hook；`prompt`、`http`、`agent` 仍主要停留在 schema 层。27 个事件（PreToolUse/PostToolUse/PostToolUseFailure/PermissionRequest/PermissionDenied/Elicitation/ElicitationResult/WorktreeCreate/WorktreeRemove/CwdChanged/Notification/UserPromptSubmit/SessionStart/SessionEnd/Stop/StopFailure/SubagentStart/SubagentStop/PreCompact/PostCompact/TeammateIdle/TaskCreated/TaskCompleted/ConfigChange/InstructionsLoaded/FileChanged/Setup）全部已对接 command 执行器。
 
 ### `async: True` 是如何工作的？
-`async_=True` 的 hook 在 daemon thread 中执行，fire-and-forget——立即返回 `exit_code=-1`，不阻塞主流程。`asyncRewake` 机制（exit_code=2 时触发 queue wake）尚未实现。
+`async_=True` 的 hook 在 daemon thread 中执行，fire-and-forget——立即返回 `exit_code=-1`，不阻塞主流程。`asyncRewake` hook 同样在 daemon thread 执行，但注册了 `on_async_hook_complete` 回调，在 thread join 后通过该回调返回实际 exit_code/stdout/stderr，调用方可用此触发 queue wake。
 
 ### 当前主要缺口是什么？
-`asyncRewake` 的 queue wake 集成（exit_code=2 检测 + `useQueueProcessor` 等效机制）；`prompt`/`http`/`agent` hook 类型的执行器。
+`prompt`/`http`/`agent` hook 类型的执行器尚未实现；SessionSpawner 与 BridgeCore 的集成需要真实 CCR 后端测试。
 
 ## 相关文件清单
 

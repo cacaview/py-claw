@@ -6,7 +6,7 @@ import json
 import shutil
 import subprocess
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
@@ -122,6 +122,8 @@ class HookRuntime:
     default_timeout_seconds: float = 600.0
     default_session_id: str = "session"
     default_transcript_path: str = ".claude/transcript.jsonl"
+    # Callback for completed async hooks: called with (exit_code, stdout, stderr, hook_event_name)
+    on_async_hook_complete: Callable[[int, str, str, str], None] | None = None
 
     def run_pre_tool_use(
         self,
@@ -947,7 +949,7 @@ class HookRuntime:
         event_name = hook_input.get("hook_event_name", "unknown")
 
         # Handle async hooks: run in background thread, return immediately
-        if hook.async_:
+        if hook.async_ or hook.asyncRewake:
             result_holder: dict[str, Any] = {}
 
             def run_async_hook() -> None:
@@ -968,6 +970,24 @@ class HookRuntime:
             thread = threading.Thread(target=run_async_hook, daemon=True)
             thread.start()
             # Fire-and-forget: return immediately with exit_code -1 to indicate async
+            # For asyncRewake, register completion callback to wake queue on exit_code 2
+            if hook.asyncRewake and self.on_async_hook_complete:
+
+                def watch_async_result() -> None:
+                    thread.join()
+                    completed = result_holder.get("completed")
+                    if completed:
+                        exit_code = completed.returncode
+                        stdout = completed.stdout or ""
+                        stderr = completed.stderr or ""
+                    else:
+                        exit_code = -1
+                        stdout = ""
+                        stderr = result_holder.get("error", "unknown error")
+                    self.on_async_hook_complete(exit_code, stdout, stderr, event_name)
+
+                watcher = threading.Thread(target=watch_async_result, daemon=True)
+                watcher.start()
             return HookExecutionRecord(
                 event=event_name,
                 command=hook.command,

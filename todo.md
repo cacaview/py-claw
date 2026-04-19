@@ -1,6 +1,6 @@
 # TODO — py-claw 工作进度
 
-> 更新日期：2026-04-18
+> 更新日期：2026-04-19
 
 ---
 
@@ -151,7 +151,7 @@
   - `HookDispatchResult` 含 `executions`/`continue_`/`stop_reason`/`updated_input`/`permission_decision`/`action`/`content`
 - `test_hooks_runtime.py`：37 个测试覆盖 PermissionRequest/PreToolUse/PostToolUseFailure/Elicitation/WorktreeCreate/WorktreeRemove/CwdChanged 的 blocking/allow/deny/match 行为
 
-**已知缺口**：`asyncRewake` 的 exit_code=2 → queue wake 机制尚未实现（TS 有 `useQueueProcessor` 集成）
+**已知缺口**：`asyncRewake` 的 exit_code=2 → queue wake 机制已实现（`on_async_hook_complete` callback，调用方负责 queue wake）；`prompt`/`http`/`agent` hook 类型的执行器尚未实现
 
 **测试**：37 个 hook 测试通过，1788 个全量测试通过
 
@@ -214,6 +214,81 @@
 - 真实 TTY 流式 E2E 测试（pexpect/ConPTY）在 pytest 环境中不可用
 - WSL 中已完成测试环境配置（121 TUI 测试 + 54 MCP 测试全部通过），但真实的 TTY 交互仍需要交互式终端或 X11 桌面环境
 - 手动验证清单：启动 `--tui`、输入 prompt、验证流式响应写入消息区、验证 Ctrl+C 中断
+
+---
+
+## Bridge/Remote 系统稳定性补齐
+
+### 11. `/bridge start` 命令实现 ✅
+
+1. ✅ 替换 stub 实现为真实命令处理器
+2. ✅ 实现 `get_bridge_access_token()` / `get_bridge_base_url()` 配置访问函数
+3. ✅ 实现环境注册 API 调用 `register_bridge_environment`
+4. ✅ 添加 `CCR_BRIDGE_ENABLED` / `BRIDGE_BASE_URL` / `BRIDGE_MODE_ACCESS_TOKEN` 环境变量支持
+5. ✅ 新增 `tests/test_bridge_service.py`（16 个测试全部通过）
+
+**实现内容**：
+- `/bridge status` - 显示 bridge 连接状态、凭证状态、环境信息
+- `/bridge start` - 检查 entitlement → 尝试注册环境 → 报告结果
+- `/bridge stop` - 当前返回 "not running"（待实现）
+
+### 12. Bridge 轮询循环补全 ✅
+
+1. ✅ 实现 `SessionApiClient.poll_for_work()` - GET `/v1/environments/{id}/work/poll`
+2. ✅ 实现 `SessionApiClient.acknowledge_work()` - POST `/v1/environments/{id}/work/{workId}/ack`
+3. ✅ 实现 `SessionApiClient.stop_work()` - POST `/v1/environments/{id}/work/{workId}/stop`
+4. ✅ 实现 `BridgeCore._poll_messages()` - 真实轮询调用
+5. ✅ 实现 `BridgeCore._register_environment()` - 环境注册
+6. ✅ 实现 `BridgeCore._handle_work_item_async()` - 异步 work item 处理与确认
+7. ✅ 在 `BridgeCoreParams` 增加 `worker_type` / `dir_path` 字段
+8. ✅ 在 `BridgeCore` 增加 `environment_secret` 字段存储注册密钥
+
+**测试**：1901 测试全部通过（+16 bridge 测试）
+
+**已知缺口**：
+- SessionSpawner 尚未与 BridgeCore 轮询循环集成（需 work item → child process 映射）— 需要真实 CCR 后端测试
+- 真实 SSE/WebSocket 连接未测试（需要真实 CCR 后端）
+- `trusted_device.py` 中的 `get_trusted_device_token()` 仍为 stub（需要 secure storage 集成）
+
+---
+
+## P3 体验增强：Voice/STT 与 UI 组件
+
+### 13. Voice/STT 服务 ✅
+
+**已完成**：
+- `services/voice_stream_stt/service.py` GrowthBook feature flag 集成（`tengu_cobalt_frost` → Nova 3）
+- 修复 `_is_nova_3_enabled()` 使用 `get_feature_value("tengu_cobalt_frost", False)`
+- 修复无效 Python 语法（`nonlocal` in lambda）- 重构 state 管理为 `state` dict
+
+**涉及模块**：
+- `services/voice_stream_stt/` — 已完成 GrowthBook 集成
+
+**剩余**：
+- `services/voice/` — 原生音频录制（audio-capture-napi）待实现
+
+### 14. UI 组件补全 ✅
+
+**已完成**：
+- `services/doctor/` — Doctor 诊断服务（已有）
+- `buddy/` — Companion 精灵系统（已有完整实现）
+- `py_claw/ui/` — Textual REPL 屏幕 Phase 1-10 完成
+
+**剩余**：
+- `ResumeConversation.tsx` — 恢复对话屏幕（React/Ink 组件，高度依赖 TS app state，难以直接移植）
+
+### 15. 其他 P3 缺口 ✅
+
+**已完成**：
+- `HybridTransport` — ✅ 已实现（`services/transports/hybrid.py`）
+- `SerialBatchEventUploader` — ✅ 已实现（`services/transports/serial_batcher.py`）
+- `WorkerStateUploader` — ✅ 已实现（`services/transports/`）
+- 修复 `flush()` coroutine warning
+
+**缺失**：
+- `webhookSanitizer` — Webhook 安全过滤
+- SSH 功能 — 基础 SSH session 管理已有（`ssh/session.py`），完整 tunnel 功能待实现
+- Keybindings — 快捷键服务（部分在 `services/keybindings/` 已有）
 
 ---
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from py_claw.services.bridge.types import BridgeConfig
-
 
 # Default bridge configuration
 DEFAULT_BRIDGE_CONFIG = BridgeConfig(
@@ -16,6 +16,9 @@ DEFAULT_BRIDGE_CONFIG = BridgeConfig(
     request_timeout_seconds=30.0,
     ping_interval_seconds=30.0,
 )
+
+# Production API base URL for CCR (Claude Code Remote)
+DEFAULT_BRIDGE_BASE_URL = "https://api.anthropic.com"
 
 
 @dataclass
@@ -43,6 +46,8 @@ def get_bridge_feature_config() -> BridgeFeatureConfig:
 
     return BridgeFeatureConfig(
         bridge_mode_enabled=os.environ.get("BRIDGE_MODE", "").lower()
+        in ("true", "1", "yes"),
+        ccr_bridge_enabled=os.environ.get("CCR_BRIDGE_ENABLED", "").lower()
         in ("true", "1", "yes"),
         env_bridge_enabled=os.environ.get("ENABLE_BRIDGE", "").lower()
         in ("true", "1", "yes"),
@@ -80,3 +85,54 @@ def get_bridge_config() -> BridgeConfig:
         request_timeout_seconds=DEFAULT_BRIDGE_CONFIG.request_timeout_seconds,
         ping_interval_seconds=DEFAULT_BRIDGE_CONFIG.ping_interval_seconds,
     )
+
+
+def get_bridge_access_token() -> str | None:
+    """Get the access token for bridge API calls.
+
+    Returns:
+        Access token string if available, None otherwise.
+
+    Priority:
+    1. BRIDGE_MODE_ACCESS_TOKEN env var (for testing/development)
+    2. CLAUDE_BRIDGE_OAUTH_TOKEN env var (ant-only dev override)
+    3. OAuth tokens from secure storage
+    """
+    # Dev override for testing
+    override = os.environ.get("CLAUDE_BRIDGE_OAUTH_TOKEN") or os.environ.get(
+        "BRIDGE_MODE_ACCESS_TOKEN"
+    )
+    if override:
+        return override
+
+    # Try OAuth tokens
+    try:
+        from py_claw.services.auth import get_claude_ai_oauth_tokens
+
+        tokens = get_claude_ai_oauth_tokens()
+        if tokens and tokens.get("accessToken"):
+            return tokens["accessToken"]
+    except Exception:
+        pass
+
+    return None
+
+
+def get_bridge_base_url() -> str:
+    """Get the base URL for bridge API calls.
+
+    Returns:
+        Base URL string.
+
+    Priority:
+    1. CLAUDE_BRIDGE_BASE_URL env var (ant-only dev override)
+    2. BRIDGE_BASE_URL env var (general override)
+    3. Default production URL
+    """
+    override = os.environ.get("CLAUDE_BRIDGE_BASE_URL") or os.environ.get(
+        "BRIDGE_BASE_URL"
+    )
+    if override:
+        return override.rstrip("/")
+
+    return DEFAULT_BRIDGE_BASE_URL
