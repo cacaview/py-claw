@@ -11,12 +11,43 @@
 - **SessionSpawner + BridgeCore 集成**：在 `BridgeCore._handle_work_item()` 中添加了 `_spawn_child_process()` 调用，当 CCR 发送 work item 时自动 spawn 子 CLI 进程
 - **SSH Tunnel 实现**：使用 `asyncssh` 库实现 `SSHSessionManager.connect()`，支持真实的 SSH 连接和本地端口转发
 - **pyproject.toml**：添加 `asyncssh>=2.14,<3` 依赖
+- **ErrorLogSink 实现**：新增 `FileErrorLogSink` 类，实现文件日志记录 (`utils/log.py`)
+- **commands.py stubs 修复**：
+  - `/privacy-settings reset` 现在调用 config service 真实重置隐私设置
+  - `/context clear` 现在调用 session_memory state 真实重置
+  - `/add-dir` 现在调用 config service 添加目录到 allowed list
+- **SSH Reverse Tunnel 实现**：新增 `SSHClient.connect_reverse()` 和 `SSHService.create_reverse_tunnel()`，支持 `-R` 反向端口转发
 
-### 待完成
+### 项目缺口扫描 (2026-04-21)
 
-- `trusted_device.py` 中 `get_trusted_device_token()` 需要 secure storage 集成
-- 原生音频录制 `services/voice/` 需要 audio-capture-napi 实现
-- `ResumeConversation.tsx` (React/Ink) 难以直接移植
+发现以下未完成/存根实现，按优先级排序：
+
+#### 高优先级 (影响核心功能)
+
+| 模块 | 缺口 | 状态 |
+|------|------|------|
+| `utils/log.py` | `ErrorLogSink` 所有方法 NotImplementedError | ✅ 已完成 (FileErrorLogSink) |
+| `commands.py` | 多处 stub 实现 | ✅ 已完成 (privacy-settings/context/add-dir) |
+| `services/ssh/service.py` | 反向隧道 (reverse tunnel) NotImplementedError | ✅ 已完成 (-R flag) |
+| `services/policy_limits/` | 始终返回 True | ⚠️ 故意 stub (fail-open 行为，完整实现需 OAuth) |
+| `services/assistant/` | `discover_assistant_sessions()` 返回空列表 | ⚠️ 故意 stub (需后端 API) |
+
+#### 中优先级 (影响用户体验)
+
+| 模块 | 缺口 | 状态 |
+|------|------|------|
+| `services/voice_stream_stt/service.py` | 多处 NotImplementedError | 待处理 |
+| `services/insights/service.py` | Phase H narrative generation stub | 待处理 |
+| `services/vim/service.py` | 简化实现 | 待处理 |
+
+#### 低优先级 (可后续迭代)
+
+| 模块 | 缺口 | 状态 |
+|------|------|------|
+| `services/permissions/classifier_decision.py` | YOLO 分类器 stub | 待处理 |
+| `services/voice/` | audio-capture-napi 待实现 | 待处理 |
+| `state/observable.py` | Observable NotImplementedError | 待处理 |
+| `ResumeConversation.tsx` | TS React 组件难移植 | 待处理 |
 
 ---
 

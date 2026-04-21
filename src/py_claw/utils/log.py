@@ -55,6 +55,125 @@ class ErrorLogSink:
         raise NotImplementedError
 
 
+class FileErrorLogSink(ErrorLogSink):
+    """File-based error logging sink.
+
+    Writes errors and MCP logs to structured JSON files in the Claude data directory.
+    """
+
+    def __init__(self, base_path: Path | None = None) -> None:
+        """Initialize file error log sink.
+
+        Args:
+            base_path: Base directory for logs (defaults to ~/.claude/logs)
+        """
+        if base_path is None:
+            base_path = Path.home() / ".claude" / "logs"
+        self._base_path = base_path
+        self._errors_path = base_path / "errors"
+        self._mcp_path = base_path / "mcp"
+        self._ensure_dirs()
+
+    def _ensure_dirs(self) -> None:
+        """Ensure log directories exist."""
+        self._errors_path.mkdir(parents=True, exist_ok=True)
+        self._mcp_path.mkdir(parents=True, exist_ok=True)
+
+    def _write_json_log(self, path: Path, entry: dict) -> None:
+        """Write a JSON entry to a log file.
+
+        Args:
+            path: Path to log file
+            entry: Dictionary entry to write
+        """
+        import json
+
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # Silently ignore logging failures
+
+    def _get_error_file_path(self) -> Path:
+        """Get path to today's error log file."""
+        from datetime import datetime
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        return self._errors_path / f"errors-{today}.jsonl"
+
+    def log_error(self, error: str) -> None:
+        """Log an error to the error file.
+
+        Args:
+            error: Error string to log
+        """
+        from datetime import datetime
+
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "type": "error",
+            "error": error,
+        }
+        self._write_json_log(self._get_error_file_path(), entry)
+
+    def log_mcp_error(self, server_name: str, error: str) -> None:
+        """Log an MCP error to the server's log file.
+
+        Args:
+            server_name: Name of the MCP server
+            error: Error string to log
+        """
+        from datetime import datetime
+
+        safe_name = server_name.replace("/", "_").replace("\\", "_")
+        log_file = self._mcp_path / f"{safe_name}-errors.jsonl"
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "type": "mcp_error",
+            "server": server_name,
+            "error": error,
+        }
+        self._write_json_log(log_file, entry)
+
+    def log_mcp_debug(self, server_name: str, message: str) -> None:
+        """Log an MCP debug message to the server's log file.
+
+        Args:
+            server_name: Name of the MCP server
+            message: Debug message to log
+        """
+        from datetime import datetime
+
+        safe_name = server_name.replace("/", "_").replace("\\", "_")
+        log_file = self._mcp_path / f"{safe_name}-debug.jsonl"
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "type": "mcp_debug",
+            "server": server_name,
+            "message": message,
+        }
+        self._write_json_log(log_file, entry)
+
+    def get_errors_path(self) -> str:
+        """Get path to errors directory.
+
+        Returns:
+            String path to errors directory
+        """
+        return str(self._errors_path)
+
+    def get_mcp_logs_path(self, server_name: str) -> str:
+        """Get path to MCP logs directory for a specific server.
+
+        Args:
+            server_name: Name of the MCP server
+
+        Returns:
+            String path to MCP logs directory
+        """
+        return str(self._mcp_path)
+
+
 # Queued events before sink is attached
 _error_queue: list[dict] = []
 

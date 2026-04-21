@@ -97,21 +97,52 @@ class SSHService:
 
         Returns:
             Created TunnelInfo.
+
+        Raises:
+            SSHError: If tunnel creation fails.
         """
-        # For reverse tunnels, we use the client differently
-        # This is a simplified version - full reverse tunnel support
-        # would require different SSH options
         config = SSHConfig(
             host=host,
             user=user,
         )
 
         if name is None:
-            name = f"reverse-tunnel-{local_port}-{host}"
+            name = self._generate_reverse_tunnel_name(host, remote_port)
 
-        # Note: Full reverse tunnel support would need -R flag
-        # This is a placeholder for the interface
-        raise NotImplementedError("Reverse tunnels not yet implemented")
+        # Create client and connect with reverse tunnel
+        client = SSHClient(config)
+        tunnel_info = client.connect_reverse(remote_port, local_port)
+        tunnel_info.name = name
+
+        # Register with manager
+        self._manager._tunnels[name] = tunnel_info
+
+        logger.info(f"Created reverse tunnel '{name}': remote :{remote_port} -> local :{local_port}")
+        return tunnel_info
+
+    def _generate_reverse_tunnel_name(
+        self,
+        host: str,
+        remote_port: int,
+    ) -> str:
+        """Generate a unique reverse tunnel name.
+
+        Args:
+            host: Remote host.
+            remote_port: Remote port.
+
+        Returns:
+            Generated tunnel name.
+        """
+        base = f"reverse-tunnel-{remote_port}-{host}"
+
+        # Check for existing name and add suffix if needed
+        counter = 1
+        while self._manager.get_tunnel(base) is not None:
+            base = f"reverse-tunnel-{remote_port}-{host}-{counter}"
+            counter += 1
+
+        return base
 
     def close_tunnel(self, name: str) -> bool:
         """Close a tunnel by name.

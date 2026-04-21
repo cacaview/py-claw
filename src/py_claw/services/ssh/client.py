@@ -46,6 +46,124 @@ class SSHClient:
         with self._lock:
             return self._process is not None and self._process.poll() is None
 
+    def connect_reverse(
+        self,
+        remote_port: int,
+        local_port: int,
+        remote_bind_address: str = "127.0.0.1",
+    ) -> TunnelInfo:
+        """Establish SSH connection with reverse port forwarding.
+
+        Args:
+            remote_port: Port on remote host to bind.
+            local_port: Local port to forward from.
+            remote_bind_address: Address to bind on remote (default 127.0.0.1).
+
+        Returns:
+            TunnelInfo with connection details.
+
+        Raises:
+            SSHError: If connection fails.
+        """
+        # Build reverse SSH command
+        cmd = self._build_reverse_ssh_command(remote_port, local_port, remote_bind_address)
+
+        logger.debug(f"Starting SSH reverse tunnel: {' '.join(cmd)}")
+
+        try:
+            # Start SSH process
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            # Give it a moment to start
+            time.sleep(0.5)
+
+            # Check if process started successfully
+            if self._process.poll() is not None:
+                _, stderr = self._process.communicate()
+                error_msg = stderr.decode("utf-8", errors="replace").strip()
+                raise SSHError(f"SSH process exited immediately: {error_msg}")
+
+            # Create reverse port forward for info
+            pf = PortForward(
+                local_port=local_port,
+                remote_host="127.0.0.1",  # Local side from remote perspective
+                remote_port=remote_port,
+                bind_address=remote_bind_address,
+            )
+
+            # Create tunnel info
+            tunnel_info = TunnelInfo(
+                name="",
+                config=self._config,
+                port_forwards=[pf],
+                status=TunnelStatus.ACTIVE,
+                process=self._process,
+                started_at=time.time(),
+            )
+
+            logger.info(f"SSH reverse tunnel established successfully")
+            return tunnel_info
+
+        except FileNotFoundError:
+            raise SSHError("SSH command not found. Is OpenSSH installed?")
+
+    def _build_reverse_ssh_command(
+        self,
+        remote_port: int,
+        local_port: int,
+        remote_bind_address: str = "127.0.0.1",
+    ) -> list[str]:
+        """Build SSH command with reverse port forwarding.
+
+        Args:
+            remote_port: Port on remote host to bind.
+            local_port: Local port to forward from.
+            remote_bind_address: Address to bind on remote.
+
+        Returns:
+            SSH command as list of arguments.
+        """
+        cmd = [DEFAULT_SSH_CMD]
+
+        # Add user if specified
+        if self._config.user:
+            cmd.append(f"{self._config.user}@{self._config.host}")
+        else:
+            cmd.append(self._config.host)
+
+        # Add reverse port forward (-R flag)
+        cmd.extend(["-R", f"{remote_bind_address}:{remote_port}:127.0.0.1:{local_port}"])
+
+        # Connection options
+        cmd.extend([
+            "-o", f"ServerAliveInterval={self._config.server_alive_interval}",
+            "-o", f"ServerAliveCountMax={self._config.server_alive_count_max}",
+            "-o", f"ConnectTimeout={self._config.connect_timeout}",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
+        ])
+
+        # Jump host
+        if self._config.jump_host:
+            cmd.extend(["-J", self._config.jump_host])
+
+        # Don't execute remote command
+        cmd.append("-N")
+
+        # Port
+        if self._config.port != 22:
+            cmd.extend(["-p", str(self._config.port)])
+
+        # Key file
+        if self._config.key_file:
+            cmd.extend(["-i", self._config.key_file])
+
+        return cmd
+
     def connect(self, port_forwards: list[PortForward]) -> TunnelInfo:
         """Establish SSH connection with port forwarding.
 

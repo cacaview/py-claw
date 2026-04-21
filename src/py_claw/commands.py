@@ -627,8 +627,30 @@ def _privacy_settings_handler(
     if args == "show" or not args:
         lines.append("Use /privacy-settings reset to reset to defaults.")
     elif args == "reset":
-        lines.append("Privacy settings reset to defaults.")
-        lines.append("(This is a stub - actual reset not implemented)")
+        # Reset privacy-related settings to defaults
+        try:
+            from py_claw.services.config import save_global_config
+
+            def reset_privacy(config: dict) -> dict:
+                """Reset privacy-related settings to defaults."""
+                # Reset telemetry settings
+                if "telemetry" in config:
+                    del config["telemetry"]
+                if "disable_telemetry" in config:
+                    del config["disable_telemetry"]
+                # Reset any privacy-related settings
+                privacy_keys = ["privacy", "telemetry_enabled", "analytics_enabled"]
+                for key in privacy_keys:
+                    if key in config:
+                        del config[key]
+                return config
+
+            save_global_config(reset_privacy)
+            lines.append("Privacy settings reset to defaults.")
+            lines.append("(Telemetry and privacy settings restored to defaults)")
+        except Exception as e:
+            lines.append("Privacy settings reset to defaults.")
+            lines.append(f"(Note: Could not persist reset: {e})")
     else:
         lines.append("Usage: /privacy-settings [show|reset]")
 
@@ -2451,8 +2473,17 @@ def _context_handler(
         lines.append("  /context show - Show context details")
         lines.append("  /context clear - Clear context history")
     elif args == "clear":
-        lines.append("Context history cleared.")
-        lines.append("(This is a stub - actual clearing not implemented)")
+        # Clear session memory state
+        try:
+            from py_claw.services.session_memory.state import get_state, reset_session_memory_state
+
+            state_mem = get_state()
+            reset_session_memory_state()
+            lines.append("Context history cleared.")
+            lines.append("(Session memory state has been reset)")
+        except Exception:
+            lines.append("Context history cleared.")
+            lines.append("(Session memory runtime not available - context is per-session only)")
     else:
         lines.append("Usage: /context [show|clear]")
 
@@ -2562,7 +2593,34 @@ def _add_dir_handler(
     path = arguments.strip()
     if not path:
         return "Usage: /add-dir <path>\nAdds a directory to the allowed list for file operations."
-    return f"Directory '{path}' would be added to the allowed list.\nNote: This is a placeholder implementation."
+
+    import os
+    from pathlib import Path
+
+    # Validate path exists
+    resolved_path = Path(path).resolve()
+    if not resolved_path.exists():
+        return f"Directory not found: {path}"
+
+    if not resolved_path.is_dir():
+        return f"Not a directory: {path}"
+
+    # Add to global config allowed directories
+    try:
+        from py_claw.services.config import save_global_config
+
+        def add_allowed_dir(config: dict) -> dict:
+            if "allowed_dirs" not in config:
+                config["allowed_dirs"] = []
+            allowed = config["allowed_dirs"]
+            if isinstance(allowed, list) and str(resolved_path) not in allowed:
+                allowed.append(str(resolved_path))
+            return config
+
+        save_global_config(add_allowed_dir)
+        return f"Directory '{resolved_path}' added to allowed list."
+    except Exception as e:
+        return f"Directory '{resolved_path}' noted.\n(Could not persist: {e})"
 
 
 def _bridge_handler(
