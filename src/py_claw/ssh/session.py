@@ -123,6 +123,8 @@ class SSHSessionManager:
         Returns:
             True if connection successful
         """
+        import asyncssh
+
         session = self._sessions.get(session_id)
         if not session:
             logger.error("Session not found: %s", session_id)
@@ -130,14 +132,68 @@ class SSHSessionManager:
 
         try:
             session.status = "connecting"
-            # In a full implementation, this would:
-            # 1. Establish SSH connection using asyncssh or similar
-            # 2. Create local port forwarding tunnel
-            # 3. Verify connection is working
-            session.status = "connected"
-            logger.info("Connected SSH session: %s", session_id)
-            return True
 
+            # Determine SSH port
+            port = session.port or 22
+
+            # Build SSH connection options
+            conn_options = {
+                "host": session.host,
+                "port": port,
+                "username": session.user,
+                "known_hosts": None,  # Disable host key checking for flexibility
+            }
+
+            # Add authentication
+            if session.metadata.get("key_file"):
+                conn_options["client_keys"] = [session.metadata["key_file"]]
+            elif session.metadata.get("password"):
+                conn_options["password"] = session.metadata["password"]
+
+            # Establish SSH connection
+            async with asyncssh.connect(**conn_options) as conn:
+                # Create local port forwarding tunnel
+                local_port = session.tunnel_local_port or 0
+                remote_host = session.metadata.get("tunnel_remote_host", "localhost")
+                remote_port = session.tunnel_remote_port or 8080
+
+                # Start a port forwarder
+                listener = await conn.forward_remote_listen(
+                    remote_host,
+                    remote_port,
+                    listen_host="localhost",
+                    listen_port=local_port,
+                )
+
+                # Update session with actual local port if assigned
+                if local_port == 0 and listener:
+                    local_port = listener._port if hasattr(listener, '_port') else 0
+                    session.tunnel_local_port = local_port
+
+                # Keep connection alive until disconnect
+                session.status = "connected"
+                logger.info(
+                    "Connected SSH session: %s -> tunnel local=%s remote=%s:%s",
+                    session_id,
+                    local_port,
+                    remote_host,
+                    remote_port,
+                )
+
+                # Store the listener for cleanup
+                self._active_tunnels[session_id] = listener
+
+                # Wait for tunnel to be closed
+                await listener.wait_closed()
+
+        except asyncssh.DisconnectError as e:
+            logger.error("SSH disconnect error for session %s: %s", session_id, e)
+            session.status = "failed"
+            return False
+        except asyncssh.ConnectionLost as e:
+            logger.error("SSH connection lost for session %s: %s", session_id, e)
+            session.status = "disconnected"
+            return False
         except Exception as e:
             logger.error("Failed to connect session %s: %s", session_id, e)
             session.status = "failed"

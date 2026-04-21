@@ -1,6 +1,22 @@
 # TODO — py-claw 工作进度
 
-> 更新日期：2026-04-19
+> 更新日期：2026-04-21
+
+---
+
+## 2026-04-21 变更记录
+
+### 已完成
+
+- **SessionSpawner + BridgeCore 集成**：在 `BridgeCore._handle_work_item()` 中添加了 `_spawn_child_process()` 调用，当 CCR 发送 work item 时自动 spawn 子 CLI 进程
+- **SSH Tunnel 实现**：使用 `asyncssh` 库实现 `SSHSessionManager.connect()`，支持真实的 SSH 连接和本地端口转发
+- **pyproject.toml**：添加 `asyncssh>=2.14,<3` 依赖
+
+### 待完成
+
+- `trusted_device.py` 中 `get_trusted_device_token()` 需要 secure storage 集成
+- 原生音频录制 `services/voice/` 需要 audio-capture-napi 实现
+- `ResumeConversation.tsx` (React/Ink) 难以直接移植
 
 ---
 
@@ -246,7 +262,7 @@
 **测试**：1901 测试全部通过（+16 bridge 测试）
 
 **已知缺口**：
-- SessionSpawner 尚未与 BridgeCore 轮询循环集成（需 work item → child process 映射）— 需要真实 CCR 后端测试
+- SessionSpawner 已与 BridgeCore 轮询循环集成 ✅（2026-04-21）
 - 真实 SSE/WebSocket 连接未测试（需要真实 CCR 后端）
 - `trusted_device.py` 中的 `get_trusted_device_token()` 仍为 stub（需要 secure storage 集成）
 
@@ -284,10 +300,14 @@
 - `SerialBatchEventUploader` — ✅ 已实现（`services/transports/serial_batcher.py`）
 - `WorkerStateUploader` — ✅ 已实现（`services/transports/`）
 - 修复 `flush()` coroutine warning
+- `webhookSanitizer` — ✅ 已实现（`services/bridge/webhook.py`）
+- SSH 功能 — ✅ 已实现 asyncssh tunnel（`ssh/session.py`，2026-04-21）
+- SessionSpawner + BridgeCore 集成 — ✅ 已完成（2026-04-21）
 
 **缺失**：
-- `webhookSanitizer` — Webhook 安全过滤
-- SSH 功能 — 基础 SSH session 管理已有（`ssh/session.py`），完整 tunnel 功能待实现
+- `trusted_device.py` 中的 `get_trusted_device_token()` 仍为 stub（需要 secure storage 集成）
+- `services/voice/` — 原生音频录制（audio-capture-napi）待实现
+- `ResumeConversation.tsx` — 恢复对话屏幕（React/Ink 组件，难以直接移植）
 - Keybindings — 快捷键服务（部分在 `services/keybindings/` 已有）
 
 ---

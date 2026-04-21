@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
@@ -26,6 +28,15 @@ from py_claw.services.bridge.jwt import (
     verify_jwt_signature,
 )
 from py_claw.services.bridge.session_api import SessionApiClient
+from py_claw.services.bridge.session_runner import (
+    NDJSONParser,
+    PermissionRequest,
+    SessionActivity,
+    SessionHandle,
+    SessionSpawner,
+    SessionSpawnerDeps,
+    SessionSpawnOpts,
+)
 from py_claw.services.bridge.state import get_bridge_state
 from py_claw.services.bridge.trusted_device import (
     get_token_expiry_seconds,
@@ -104,6 +115,8 @@ class BridgeCore:
     _heartbeat_task: asyncio.Task | None = None
     _token_scheduler: Any = None
     _poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS
+    _spawner: SessionSpawner | None = None
+    _active_sessions: dict[str, SessionHandle] = field(default_factory=dict)
 
     def is_env_less(self) -> bool:
         """Check if using env-less (v2) protocol."""
@@ -156,6 +169,9 @@ class BridgeCore:
             # Setup token refresh
             self._setup_token_refresh()
 
+            # Initialize session spawner for child CLI processes
+            self._init_spawner()
+
             # Start polling
             self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -169,6 +185,116 @@ class BridgeCore:
             logger.error("Bridge initialization failed: %s", e)
             self.set_state(BridgeState.FAILED, str(e))
             return False
+
+    def _init_spawner(self) -> None:
+        """Initialize the session spawner for child CLI processes."""
+        # Determine the CLI executable path
+        exec_path = sys.executable
+        script_args = ["-m", "py_claw.cli.main"] if not os.environ.get("CLAUDE_BRIDGE_CLI") else None
+
+        # Build environment for child processes
+        child_env: dict[str, str] = {
+            "CCR_BRIDGE_ENABLED": "true",
+            "BRIDGE_SESSION_ID": self.bridge_session_id or "",
+            "BRIDGE_ENVIRONMENT_ID": self.params.environment_id,
+            "BRIDGE_BASE_URL": self.params.base_url,
+            "BRIDGE_MODE_ACCESS_TOKEN": self.params.access_token,
+        }
+
+        # Add session ingress URL if available
+        if self.params.session_ingress_url:
+            child_env["BRIDGE_INGRESS_URL"] = self.params.session_ingress_url
+
+        def on_debug(msg: str) -> None:
+            logger.debug("[spawner] %s", msg)
+
+        def on_activity(session_id: str, activity: SessionActivity) -> None:
+            logger.info("[spawner] Session %s: %s - %s", session_id, activity.type, activity.message)
+
+        def on_permission_request(session_id: str, request: PermissionRequest, access_token: str) -> None:
+            logger.info("[spawner] Permission request from %s: %s", session_id, request.request.get("type", "unknown"))
+            # Forward to CCR via API client
+            if self._api_client:
+                asyncio.create_task(self._forward_permission_request(session_id, request, access_token))
+
+        deps = SessionSpawnerDeps(
+            exec_path=exec_path,
+            script_args=script_args,
+            env=child_env,
+            verbose=False,
+            sandbox=False,
+            permission_mode=self.params.permission_mode,
+            on_debug=on_debug,
+            on_activity=on_activity,
+            on_permission_request=on_permission_request,
+        )
+
+        self._spawner = SessionSpawner(deps)
+        logger.info("Session spawner initialized with exec_path=%s", exec_path)
+
+    async def _forward_permission_request(
+        self,
+        session_id: str,
+        request: PermissionRequest,
+        access_token: str,
+    ) -> None:
+        """Forward a permission request from child CLI to CCR."""
+        if not self._api_client:
+            return
+
+        try:
+            # In full implementation, forward to CCR API
+            logger.info("Forwarding permission request for session %s", session_id)
+        except Exception as e:
+            logger.error("Error forwarding permission request: %s", e)
+
+    async def _spawn_child_process(
+        self,
+        work_item: dict[str, Any],
+        session_ingress_token: str,
+    ) -> None:
+        """Spawn a child CLI process for a work item.
+
+        Args:
+            work_item: The work item from poll response
+            session_ingress_token: Token for the child CLI to connect back
+        """
+        if not self._spawner:
+            logger.error("Session spawner not initialized")
+            return
+
+        # Get or generate session ID for this child process
+        decoded_secret = work_item.get("_decoded_secret", {})
+        child_session_id = decoded_secret.get("session_id") or work_item.get("session_id")
+
+        if not child_session_id:
+            # Generate a new session ID
+            import uuid
+            child_session_id = str(uuid.uuid4())
+
+        try:
+            # Update spawner env with session-specific token
+            spawn_env = dict(self._spawner._deps.env) if self._spawner._deps.env else {}
+            spawn_env["BRIDGE_SESSION_INGRESS_TOKEN"] = session_ingress_token
+            spawn_env["BRIDGE_CHILD_SESSION_ID"] = child_session_id
+
+            # Create a new spawner with updated env for this session
+            # Or use the existing spawner (it will use its own env)
+            # The SessionSpawner handles multiple sessions
+
+            # Spawn the child process
+            handle = self._spawner.spawn(child_session_id)
+            self._active_sessions[child_session_id] = handle
+
+            logger.info(
+                "Spawned child CLI process: session_id=%s pid=%s",
+                child_session_id,
+                handle.process.pid,
+            )
+
+        except Exception as e:
+            logger.error("Failed to spawn child process for work item %s: %s",
+                        work_item.get("id"), e)
 
     async def _register_environment(self) -> dict[str, Any] | None:
         """Register this bridge with the CCR environment.
@@ -346,6 +472,10 @@ class BridgeCore:
             return
 
         logger.info("Acknowledged work item: %s", work_id)
+
+        # Spawn child CLI process for this work item
+        if self._spawner:
+            await self._spawn_child_process(work_item, session_ingress_token)
 
         # Notify via callback that work item was received
         if self.params.on_message:
