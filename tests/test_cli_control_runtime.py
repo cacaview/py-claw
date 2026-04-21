@@ -99,7 +99,7 @@ def _expected_commands(*skill_entries: dict[str, str]) -> list[dict[str, str]]:
         "output-style", "passes", "perf-issue", "permissions", "plan", "plugin",
         "pr-comments", "privacy-settings", "rate-limit-options", "release-notes",
         "reload-plugins", "remote-env", "remote-setup", "rename", "resume", "review",
-        "rewind", "sandbox-toggle", "screenshot", "security-review", "session", "share",
+        "rewind", "sandbox-toggle", "screenshot", "security-review", "session", "sessions", "share",
         "skills", "stats", "status", "statusline", "stickers", "subscribe", "tag",
         "tasks", "team", "teleport", "terminal-setup", "test", "theme", "think-back",
         "thinkback-play", "tunnel", "ultraplan", "upgrade", "usage", "version", "vim",
@@ -186,6 +186,7 @@ def _expected_commands(*skill_entries: dict[str, str]) -> list[dict[str, str]]:
         "screenshot": "Take a screenshot of the current screen",
         "security-review": "Run a security review on the codebase",
         "session": "Inspect current session state",
+        "sessions": "List and manage saved sessions",
         "share": "Share current session or artifacts",
         "skills": "List and manage available skills",
         "stats": "Show session statistics and metrics",
@@ -294,6 +295,7 @@ def _expected_commands(*skill_entries: dict[str, str]) -> list[dict[str, str]]:
         "screenshot": "[output-path]",
         "security-review": "[path]",
         "session": "",
+        "sessions": "[list|search|show <session-id>]",
         "share": "[session|artifact] [id]",
         "skills": "[list|info] [skill-name]",
         "stats": "",
@@ -499,7 +501,7 @@ def test_control_runtime_get_context_usage_returns_schema_compatible_defaults() 
         "mcpTools": [],
         "deferredBuiltinTools": [{"name": name, "tokens": 0, "isLoaded": True} for name in expected_tools],
         "agents": [],
-        "slashCommands": {"totalCommands": 106, "includedCommands": 106, "tokens": 0},
+        "slashCommands": {"totalCommands": 107, "includedCommands": 107, "tokens": 0},
         "isAutoCompactEnabled": False,
     }
 
@@ -543,7 +545,7 @@ def test_control_runtime_initialize_and_context_usage_surface_settings_skills_an
         {"name": "commit", "description": "Invoke the commit skill", "argumentHint": ""},
         {"name": "review-pr", "description": "Invoke the review-pr skill", "argumentHint": ""},
     )
-    assert usage["slashCommands"] == {"totalCommands": 107, "includedCommands": 107, "tokens": 0}
+    assert usage["slashCommands"] == {"totalCommands": 108, "includedCommands": 108, "tokens": 0}
     assert initialize["agents"] == [
         {"name": "explore", "description": "Explore codebase", "model": "sonnet"},
         {"name": "planner", "description": "Plan work"},
@@ -675,7 +677,7 @@ def test_control_runtime_initialize_prefers_disk_backed_skill_metadata(tmp_path)
         {"name": "review-pr", "description": "Invoke the review-pr skill", "argumentHint": ""},
     )
     assert usage is not None
-    assert usage["slashCommands"] == {"totalCommands": 107, "includedCommands": 107, "tokens": 0}
+    assert usage["slashCommands"] == {"totalCommands": 108, "includedCommands": 108, "tokens": 0}
     assert usage["skills"]["totalSkills"] == 2
     assert usage["skills"]["includedSkills"] == 2
     assert usage["skills"]["tokens"] == 0

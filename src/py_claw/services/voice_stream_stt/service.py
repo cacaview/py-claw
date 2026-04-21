@@ -167,13 +167,15 @@ async def connect_voice_stream(
         logger.error(f"[voice_stream] Failed to create WebSocket: {e}")
         return None
 
-    # Track connection state
-    connected = False
-    finalized = False
-    finalizing = False
-    last_transcript_text = ""
-    resolve_finalize: Callable[[FinalizeSource], None] | None = None
-    cancel_no_data_timer: Callable[[], None] | None = None
+    # Track connection state using mutable containers for closure mutation
+    state = {
+        "connected": False,
+        "finalized": False,
+        "finalizing": False,
+        "last_transcript_text": "",
+        "resolve_finalize": None,
+        "cancel_no_data_timer": None,
+    }
     keepalive_timer: asyncio.Task | None = None
 
     def _log_for_debugging(msg: str) -> None:
@@ -183,18 +185,18 @@ async def connect_voice_stream(
     # Build the connection object
     connection = _build_connection_object(
         ws=ws,
-        get_connected=lambda: connected,
-        get_finalized=lambda: finalized,
-        get_finalizing=lambda: finalizing,
-        get_last_transcript=lambda: last_transcript_text,
-        set_last_transcript=lambda t: nonlocal last_transcript_text; last_transcript_text = t,
-        get_resolve_finalize=lambda: resolve_finalize,
-        set_resolve_finalize=lambda f: nonlocal resolve_finalize; resolve_finalize = f,
-        get_cancel_no_data=lambda: cancel_no_data_timer,
-        set_cancel_no_data=lambda c: nonlocal cancel_no_data_timer; cancel_no_data_timer = c,
-        set_connected=lambda v: nonlocal connected; connected = v,
-        set_finalized=lambda v: nonlocal finalized; finalized = v,
-        set_finalizing=lambda v: nonlocal finalizing; finalizing = v,
+        get_connected=lambda: state["connected"],
+        get_finalized=lambda: state["finalized"],
+        get_finalizing=lambda: state["finalizing"],
+        get_last_transcript=lambda: state["last_transcript_text"],
+        set_last_transcript=lambda t: state.update(last_transcript_text=t),
+        get_resolve_finalize=lambda: state["resolve_finalize"],
+        set_resolve_finalize=lambda f: state.update(resolve_finalize=f),
+        get_cancel_no_data=lambda: state["cancel_no_data_timer"],
+        set_cancel_no_data=lambda c: state.update(cancel_no_data_timer=c),
+        set_connected=lambda v: state.update(connected=v),
+        set_finalized=lambda v: state.update(finalized=v),
+        set_finalizing=lambda v: state.update(finalizing=v),
         log=_log_for_debugging,
     )
 
@@ -210,8 +212,6 @@ async def connect_voice_stream(
     # Start message handler
     async def handle_messages() -> None:
         """Handle incoming WebSocket messages."""
-        nonlocal last_transcript_text, finalized, resolve_finalize, cancel_no_data_timer
-
         try:
             async for msg in ws:
                 await _handle_message(
@@ -219,11 +219,7 @@ async def connect_voice_stream(
                     callbacks=callbacks,
                     connection=connection,
                     is_nova3=_is_nova_3_enabled(),
-                    finalized=finalized,
-                    last_transcript=last_transcript_text,
-                    set_last_transcript=lambda t: nonlocal last_transcript_text; last_transcript_text = t,
-                    cancel_no_data_timer=cancel_no_data_timer,
-                    resolve_finalize=resolve_finalize,
+                    state=state,
                     log=_log_for_debugging,
                 )
         except Exception as e:
@@ -231,9 +227,9 @@ async def connect_voice_stream(
 
     # Handle WebSocket events
     async def on_open() -> None:
-        nonlocal connected, keepalive_timer
+        nonlocal keepalive_timer
         _log_for_debugging("WebSocket connected")
-        connected = True
+        state["connected"] = True
 
         # Send initial KeepAlive
         _log_for_debugging("Sending initial KeepAlive")
@@ -246,35 +242,34 @@ async def connect_voice_stream(
         callbacks.on_ready(connection)
 
     async def on_close(code: int, reason: str) -> None:
-        nonlocal connected, keepalive_timer, last_transcript_text, finalizing, resolve_finalize
+        nonlocal keepalive_timer
         _log_for_debugging(f"WebSocket closed: code={code} reason={reason}")
-        connected = False
+        state["connected"] = False
 
         if keepalive_timer:
             keepalive_timer.cancel()
             keepalive_timer = None
 
         # Promote unreported interim transcript
-        if last_transcript_text:
+        if state["last_transcript_text"]:
             _log_for_debugging(
-                f"Promoting unreported interim transcript to final on close: '{last_transcript_text}'"
+                f"Promoting unreported interim transcript to final on close: '{state['last_transcript_text']}'"
             )
-            callbacks.on_transcript(last_transcript_text, True)
-            last_transcript_text = ""
+            callbacks.on_transcript(state["last_transcript_text"], True)
+            state["last_transcript_text"] = ""
 
         # Resolve finalize if pending
-        if resolve_finalize:
-            resolve_finalize(FinalizeSource.WS_CLOSE)
+        if state["resolve_finalize"]:
+            state["resolve_finalize"](FinalizeSource.WS_CLOSE)
 
         # Notify close
-        if not finalizing and code != 1000 and code != 1005:
+        if not state["finalizing"] and code != 1000 and code != 1005:
             callbacks.on_error(f"Connection closed: code {code}{f' — {reason}' if reason else ''}")
         callbacks.on_close()
 
     async def on_error(error: Exception) -> None:
-        nonlocal finalizing
         logger.error(f"[voice_stream] WebSocket error: {error}")
-        if not finalizing:
+        if not state["finalizing"]:
             callbacks.on_error(f"Voice stream connection error: {error}")
 
     # Connect
@@ -289,7 +284,7 @@ async def connect_voice_stream(
         await ws.wait_for_close()
     except Exception as e:
         _log_for_debugging(f"WebSocket error: {e}")
-        if not finalizing:
+        if not state["finalizing"]:
             callbacks.on_error(f"Voice stream connection error: {e}")
 
     return connection
@@ -335,10 +330,22 @@ def _build_url_params(options: dict[str, Any]) -> str:
 
 
 def _is_nova_3_enabled() -> bool:
-    """Check if Nova 3 feature gate is enabled."""
-    # TODO: Integrate with GrowthBook feature flags
-    # For now, check environment variable
-    return os.environ.get("VOICE_STREAM_NOVA3", "").lower() in ("1", "true", "yes")
+    """Check if Nova 3 feature gate is enabled.
+
+    Uses the GrowthBook feature flag 'tengu_cobalt_frost' to determine
+    whether to use Deepgram Nova 3 for speech-to-text.
+    """
+    # Check env var first (for testing/development)
+    if os.environ.get("VOICE_STREAM_NOVA3", "").lower() in ("1", "true", "yes"):
+        return True
+
+    # Check GrowthBook feature flag
+    try:
+        from py_claw.services.analytics import get_feature_value
+
+        return bool(get_feature_value("tengu_cobalt_frost", False))
+    except Exception:
+        return False
 
 
 async def _create_websocket(url: str, access_token: str) -> Any:
@@ -510,11 +517,7 @@ async def _handle_message(
     callbacks: VoiceStreamCallbacks,
     connection: VoiceStreamConnection,
     is_nova3: bool,
-    finalized: bool,
-    last_transcript: str,
-    set_last_transcript: Callable[[str], None],
-    cancel_no_data_timer: Callable[[], None] | None,
-    resolve_finalize: Callable[[FinalizeSource], None] | None,
+    state: dict[str, Any],
     log: Callable[[str], None],
 ) -> None:
     """Handle an incoming WebSocket message."""
@@ -533,30 +536,30 @@ async def _handle_message(
             log(f"TranscriptText: '{transcript}'")
 
             # Disarm no-data timer if finalized
-            if finalized and cancel_no_data_timer:
-                cancel_no_data_timer()
+            if state["finalized"] and state["cancel_no_data_timer"]:
+                state["cancel_no_data_timer"]()
 
             if transcript:
                 # Auto-finalize previous segment if non-cumulative
-                if not is_nova3 and last_transcript:
-                    prev = last_transcript.strip()
+                if not is_nova3 and state["last_transcript_text"]:
+                    prev = state["last_transcript_text"].strip()
                     next_t = transcript.strip()
                     if prev and next_t and not next_t.startswith(prev) and not prev.startswith(next_t):
-                        log(f"Auto-finalizing previous segment: '{last_transcript}'")
-                        callbacks.on_transcript(last_transcript, True)
+                        log(f"Auto-finalizing previous segment: '{state['last_transcript_text']}'")
+                        callbacks.on_transcript(state["last_transcript_text"], True)
 
-                set_last_transcript(transcript)
+                state["last_transcript_text"] = transcript
                 callbacks.on_transcript(transcript, False)
 
         elif msg_type == "TranscriptEndpoint":
-            log(f"TranscriptEndpoint received, lastTranscript='{last_transcript}'")
-            final_text = last_transcript
-            set_last_transcript("")
+            log(f"TranscriptEndpoint received, lastTranscript='{state['last_transcript_text']}'")
+            final_text = state["last_transcript_text"]
+            state["last_transcript_text"] = ""
             if final_text:
                 callbacks.on_transcript(final_text, True)
 
-            if finalized and resolve_finalize:
-                resolve_finalize(FinalizeSource.POST_CLOSESTREAM_ENDPOINT)
+            if state["finalized"] and state["resolve_finalize"]:
+                state["resolve_finalize"](FinalizeSource.POST_CLOSESTREAM_ENDPOINT)
 
         elif msg_type == "TranscriptError":
             desc = data.get("description") or data.get("error_code") or "unknown transcription error"

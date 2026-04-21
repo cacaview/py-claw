@@ -112,6 +112,7 @@ _BUILTIN_COMMANDS: tuple[CommandDefinition, ...] = (
     CommandDefinition(name="privacy-settings", description="Manage privacy and data settings", argument_hint="[show|reset]"),
     CommandDefinition(name="reload-plugins", description="Reload plugins and activate pending changes"),
     CommandDefinition(name="resume", description="Resume a prior session", argument_hint="<session-id>"),
+    CommandDefinition(name="sessions", description="List and manage saved sessions", argument_hint="[list|search|show <session-id>]"),
     CommandDefinition(name="release-notes", description="Show Claude Code release notes and changelog"),
     CommandDefinition(name="terminal-setup", description="Install Shift+Enter keybinding for newlines in terminals that don't support CSI u", argument_hint=""),
     CommandDefinition(name="commit", description="Create a git commit", argument_hint="[commit message]", kind="prompt", progress_message="creating commit", prompt_template="""You are creating a git commit. Follow these steps:
@@ -888,6 +889,205 @@ def _resume_handler(
     if query_runtime.restore_session_state(target):
         return f"Resumed session: {target}"
     return f"No saved session found for: {target}"
+
+
+def _sessions_handler(
+    command: CommandDefinition,
+    *,
+    arguments: str,
+    state: RuntimeState,
+    settings: SettingsLoadResult,
+    registry: CommandRegistry,
+    session_id: str | None,
+    transcript_size: int,
+) -> str:
+    """List and manage saved sessions.
+
+    Provides ResumeConversation-style session browsing:
+    - /sessions list [limit] - List recent sessions
+    - /sessions search <query> - Search sessions by title/tag/prompt
+    - /sessions show <session-id> - Show session details
+    """
+    import os
+
+    from py_claw.services.session_storage.common import get_projects_dir
+    from py_claw.services.session_storage.search import search_sessions
+
+    args = arguments.strip()
+    parts = args.split()
+    subcmd = parts[0].lower() if parts else "list"
+
+    # Get current working directory for project context
+    cwd = os.getcwd()
+
+    if subcmd == "list":
+        limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
+        limit = min(limit, 50)  # Cap at 50
+
+        # Run sync wrapper for search_sessions
+        import asyncio
+
+        try:
+            results = asyncio.run(
+                search_sessions(project_path=cwd, limit=limit)
+            )
+        except Exception as e:
+            return f"Error searching sessions: {e}"
+
+        if not results:
+            return "No sessions found. Start a new session to create one."
+
+        lines = ["=== Saved Sessions ===", ""]
+        for i, session in enumerate(results, 1):
+            # Format date
+            date_str = session.modified_date.strftime("%Y-%m-%d %H:%M")
+
+            # Format title
+            title = session.custom_title or session.first_prompt or "(no title)"
+            if len(title) > 50:
+                title = title[:47] + "..."
+
+            # Format project
+            project = session.project_path or "unknown"
+            if project:
+                # Shorten project path
+                project_name = os.path.basename(project)
+                project = f"@{project_name}"
+
+            lines.append(f"  [{i}] {title}")
+            lines.append(f"      ID: {session.session_id}")
+            lines.append(f"      Date: {date_str} | Project: {project}")
+            if session.agent_name:
+                lines.append(f"      Agent: {session.agent_name}")
+            if session.tag:
+                lines.append(f"      Tag: {session.tag}")
+            lines.append("")
+
+        lines.append(f"Use /sessions show <n> to see session details, or /resume <session-id> to resume.")
+
+        return "\n".join(lines)
+
+    elif subcmd == "search":
+        if len(parts) < 2:
+            return "Usage: /sessions search <query>"
+
+        query = " ".join(parts[1:])
+
+        import asyncio
+
+        try:
+            results = asyncio.run(
+                search_sessions(project_path=cwd, query=query, limit=20)
+            )
+        except Exception as e:
+            return f"Error searching sessions: {e}"
+
+        if not results:
+            return f"No sessions found matching: {query}"
+
+        lines = [f"=== Sessions matching: {query} ===", ""]
+        for i, session in enumerate(results, 1):
+            title = session.custom_title or session.first_prompt or "(no title)"
+            if len(title) > 50:
+                title = title[:47] + "..."
+
+            lines.append(f"  [{i}] {title}")
+            lines.append(f"      ID: {session.session_id}")
+            if session.tag:
+                lines.append(f"      Tag: {session.tag}")
+            lines.append("")
+
+        lines.append(f"Use /resume <session-id> to resume a session.")
+
+        return "\n".join(lines)
+
+    elif subcmd == "show":
+        if len(parts) < 2:
+            return "Usage: /sessions show <session-id or number>"
+
+        target = parts[1]
+
+        # If target is a number, look up by index from list
+        if target.isdigit():
+            idx = int(target) - 1
+            import asyncio
+
+            try:
+                results = asyncio.run(
+                    search_sessions(project_path=cwd, limit=50)
+                )
+            except Exception as e:
+                return f"Error fetching sessions: {e}"
+
+            if idx < 0 or idx >= len(results):
+                return f"Invalid session number: {target}"
+
+            session = results[idx]
+            session_id = session.session_id
+        else:
+            session_id = target
+
+        # Load session details
+        from py_claw.services.session_storage.common import read_session_lite
+        from py_claw.services.session_storage.search import resolve_session_file_path
+
+        resolved = resolve_session_file_path(session_id, cwd)
+        if not resolved:
+            return f"Session not found: {session_id}"
+
+        lite = asyncio.run(read_session_lite(resolved.file_path))
+        if not lite:
+            return f"Could not read session: {session_id}"
+
+        lines = [f"=== Session: {session_id} ===", ""]
+
+        # Extract metadata
+        from py_claw.services.session_storage.search import _extract_metadata_from_lite
+
+        metadata = _extract_metadata_from_lite(lite)
+
+        if metadata.get("custom_title"):
+            lines.append(f"Title: {metadata['custom_title']}")
+        if metadata.get("tag"):
+            lines.append(f"Tag: {metadata['tag']}")
+        if metadata.get("agent_name"):
+            lines.append(f"Agent: {metadata['agent_name']}")
+        if metadata.get("first_prompt"):
+            prompt = metadata["first_prompt"]
+            if len(prompt) > 200:
+                prompt = prompt[:197] + "..."
+            lines.append(f"First prompt: {prompt}")
+
+        lines.append(f"File: {resolved.file_path}")
+        lines.append(f"Size: {lite.size} bytes")
+        lines.append(f"Modified: {lite.mtime}")
+
+        # Show first few lines of transcript
+        if lite.head:
+            lines.append("")
+            lines.append("--- Transcript Preview ---")
+            head_lines = lite.head.strip().split("\n")[:10]
+            for line in head_lines:
+                if len(line) > 80:
+                    line = line[:77] + "..."
+                lines.append(line)
+
+        lines.append("")
+        lines.append(f"Use /resume {session_id} to resume this session.")
+
+        return "\n".join(lines)
+
+    else:
+        return """Usage: /sessions [list|search|show]
+  /sessions list [limit]  - List recent sessions (default: 10, max: 50)
+  /sessions search <query> - Search sessions by title, tag, or prompt
+  /sessions show <id>      - Show details of a session
+
+Examples:
+  /sessions list       - List 10 most recent sessions
+  /sessions list 20    - List 20 most recent sessions
+  /sessions search api - Find sessions mentioning 'api'
+  /sessions show abc123 - Show details of session abc123"""
 
 
 def _session_handler(
@@ -2379,23 +2579,170 @@ def _bridge_handler(
     args = arguments.strip().lower()
 
     if not args or args == "status":
-        return """=== Claude Code Remote Bridge ===
-
-Status: Not connected
-
-Usage: /bridge [start|stop|status|connect]
-  start   - Start the bridge server
-  stop    - Stop the bridge server
-  status  - Show bridge connection status
-  connect - Connect to a bridge server"""
+        return _bridge_status()
     elif args == "start":
-        return "Bridge server is not yet implemented in this version."
+        return _bridge_start(settings)
     elif args == "stop":
-        return "Bridge server is not running."
+        return _bridge_stop()
     elif args == "connect":
         return "Bridge client connection is not yet implemented."
     else:
         return f"Unknown argument: {args}\nUsage: /bridge [start|stop|status|connect]"
+
+
+def _bridge_status() -> str:
+    """Get current bridge status."""
+    from py_claw.services.bridge.config import get_bridge_access_token, get_bridge_base_url
+    from py_claw.services.bridge.enabled import (
+        get_bridge_disabled_reason,
+        is_bridge_enabled,
+    )
+    from py_claw.services.bridge.state import get_bridge_state
+
+    enabled = is_bridge_enabled()
+    reason = get_bridge_disabled_reason()
+    token = get_bridge_access_token()
+    base_url = get_bridge_base_url()
+    bridge_state = get_bridge_state()
+
+    lines = [
+        "=== Claude Code Remote Bridge ===",
+        "",
+    ]
+
+    if reason:
+        lines.append(f"Status: Disabled ({reason})")
+    elif token:
+        lines.append("Status: Enabled")
+        lines.append(f"  Access token: Available")
+        lines.append(f"  Base URL: {base_url}")
+    else:
+        lines.append("Status: No credentials")
+        lines.append("  Run `/login` first to authenticate with claude.ai")
+
+    lines.append("")
+    lines.append(f"Bridge state: {bridge_state._global_state.value}")
+    lines.append("")
+    lines.append("Usage: /bridge [start|stop|status|connect]")
+    lines.append("  start   - Start the bridge server")
+    lines.append("  stop    - Stop the bridge server")
+    lines.append("  status  - Show bridge connection status")
+    lines.append("  connect - Connect to a bridge server (viewer mode)")
+
+    return "\n".join(lines)
+
+
+def _bridge_start(settings: SettingsLoadResult) -> str:
+    """Attempt to start the bridge server."""
+    import os
+    import socket
+
+    from py_claw.services.bridge.config import (
+        get_bridge_access_token,
+        get_bridge_base_url,
+    )
+    from py_claw.services.bridge.enabled import (
+        get_bridge_disabled_reason,
+        is_bridge_enabled,
+    )
+    from py_claw.services.bridge.session_api import SessionApiClient
+
+    # Check if bridge is enabled
+    reason = get_bridge_disabled_reason()
+    if reason:
+        return f"Error: {reason}"
+
+    # Check for required credentials
+    access_token = get_bridge_access_token()
+    if not access_token:
+        return """Error: Not authenticated for Remote Control.
+
+Remote Control requires claude.ai authentication.
+Please run `/login` first to authenticate."""
+
+    base_url = get_bridge_base_url()
+
+    # Get local IP for display
+    local_ip = _get_local_ip()
+
+    lines = [
+        "=== Starting Claude Code Remote Bridge ===",
+        "",
+        f"Base URL: {base_url}",
+        f"Local IP: {local_ip}",
+        "",
+    ]
+
+    # Attempt to register environment
+    lines.append("Registering bridge environment...")
+
+    try:
+        import asyncio
+        import uuid
+
+        client = SessionApiClient(base_url=base_url, access_token=access_token)
+        environment_id = str(uuid.uuid4())
+
+        result = asyncio.run(
+            client.register_bridge_environment(
+                environment_id=environment_id,
+                worker_type="claude_code",
+                machine_name=socket.gethostname(),
+            )
+        )
+
+        if result:
+            environment_secret = result.get("environment_secret", "N/A")
+            lines.append(f"Environment ID: {environment_id}")
+            lines.append(f"Environment secret: {environment_secret[:16]}...")
+            lines.append("")
+            lines.append("Bridge environment registered successfully.")
+            lines.append("")
+            lines.append(
+                "Note: The bridge server requires a CCR-compatible backend."
+            )
+            lines.append(
+                "Set BRIDGE_MODE=1 and ensure you have a valid claude.ai subscription."
+            )
+            return "\n".join(lines)
+        else:
+            lines.append("Failed to register bridge environment.")
+            lines.append("Check your network connection and try again.")
+            return "\n".join(lines)
+
+    except Exception as e:
+        lines.append(f"Error: {e}")
+        lines.append("")
+        lines.append(
+            "The bridge requires a CCR-compatible backend to function."
+        )
+        lines.append("This feature is under development.")
+        return "\n".join(lines)
+
+
+def _bridge_stop() -> str:
+    """Stop the bridge server."""
+    from py_claw.services.bridge.state import get_bridge_state
+
+    state = get_bridge_state()
+
+    if state._global_state.value == "disconnected":
+        return "Bridge server is not running."
+
+    # In a full implementation, this would signal the bridge to shut down
+    return f"Bridge server state: {state._global_state.value}\nStop command not yet implemented."
+
+
+def _get_local_ip() -> str:
+    """Get the local IP address for display."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 def _break_cache_handler(
@@ -4895,6 +5242,7 @@ _LOCAL_COMMAND_HANDLERS: dict[str, object] = {
     "insights": _insights_handler,
     "add-dir": _add_dir_handler,
     "bridge": _bridge_handler,
+    "sessions": _sessions_handler,
     "break-cache": _break_cache_handler,
     "heapdump": _heapdump_handler,
     "sandbox-toggle": _sandbox_toggle_handler,

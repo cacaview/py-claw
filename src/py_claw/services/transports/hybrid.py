@@ -192,7 +192,9 @@ class HybridTransport(WebSocketTransport):
 
     def flush(self) -> asyncio.Future:
         """Block until all pending events are POSTed."""
-        self._uploader.enqueue(self._take_stream_events())
+        buffered = self._take_stream_events()
+        if buffered:
+            asyncio.create_task(self._uploader.enqueue(buffered))
         return self._uploader.flush()
 
     def _take_stream_events(self) -> list[dict[str, Any]]:
