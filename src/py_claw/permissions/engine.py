@@ -7,6 +7,7 @@ from py_claw.schemas.common import PermissionMode
 from py_claw.settings.loader import SettingsLoadResult
 from py_claw.permissions.rules import PermissionRule, PermissionTarget, matches_permission_rule
 from py_claw.permissions.state import PermissionContext, build_permission_context
+from py_claw.services.permissions.classifier_decision import classify_yolo_action
 
 PermissionOutcome = Literal["allow", "deny", "ask"]
 
@@ -60,6 +61,22 @@ class PermissionEngine:
                 mode=self.context.mode,
                 matched_rule=allow_rule,
                 reason="allow_rule",
+            )
+
+        # No rule matched - use YOLO classifier as fallback before defaulting to ask
+        # This provides automatic allow/deny for known-safe/dangerous operations
+        yolo_result = classify_yolo_action(
+            messages=[],
+            action=tool_name,
+            tools=[],
+            permission_context={"mode": self.context.mode},
+            abort_signal=None,
+        )
+        if yolo_result["should_block"]:
+            return PermissionEvaluation(
+                behavior="deny",
+                mode=self.context.mode,
+                reason=f"yolo:{yolo_result['reason']}",
             )
 
         return self._finalize_ask_result(PermissionEvaluation(behavior="ask", mode=self.context.mode, reason="default"))

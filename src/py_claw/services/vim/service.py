@@ -1,20 +1,56 @@
 """
 Vim service for managing Vim mode.
 
-Note: This is a simplified implementation. The actual Claude Code
-Vim mode is more sophisticated with keybinding integration.
+Provides Vim editing mode state management with TUI integration.
+When vim mode changes, publishes updates to the global TUI store
+so the UI can react to mode changes.
+
+Based on ClaudeCode-main/src/services/vim/
 """
 from __future__ import annotations
 
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .types import VimConfig, VimMode, VimResult
+
+if TYPE_CHECKING:
+    from py_claw.state.tui_state import TUIStateSnapshot
 
 logger = logging.getLogger(__name__)
 
 _vim_config = VimConfig()
+
+# ── TUI state integration ──────────────────────────────────────────────────
+
+
+def _get_tui_state_snapshot() -> "TUIStateSnapshot | None":
+    """Get TUI state snapshot if available."""
+    try:
+        from py_claw.state.tui_state import get_tui_state_snapshot
+        return get_tui_state_snapshot()
+    except ImportError:
+        return None
+
+
+def _publish_vim_mode_to_tui(mode: VimMode | None) -> None:
+    """Publish vim mode change to global TUI store.
+
+    Args:
+        mode: The new vim mode, or None if vim is disabled
+    """
+    try:
+        from py_claw.state.tui_state import update_tui_vim_mode
+        # Convert lowercase vim service mode to uppercase TUI mode
+        if mode is None:
+            update_tui_vim_mode("INSERT")  # Default when disabled
+        else:
+            tui_mode = mode.value.upper()
+            update_tui_vim_mode(tui_mode)
+    except ImportError:
+        logger.debug("TUI state not available for vim mode publish")
 
 
 def get_vim_storage_path() -> Path:
@@ -99,16 +135,21 @@ def toggle_vim_mode() -> VimResult:
     global _vim_config
     _vim_config = load_vim_config()
 
+    was_enabled = _vim_config.enabled
     _vim_config.enabled = not _vim_config.enabled
     save_vim_config(_vim_config)
 
     if _vim_config.enabled:
+        # Publish to TUI state when enabling
+        _publish_vim_mode_to_tui(_vim_config.current_mode)
         return VimResult(
             success=True,
             message="Vim mode enabled. Use 'i' for insert mode, Escape to return to normal mode.",
             mode=_vim_config.current_mode,
         )
     else:
+        # Clear TUI vim mode when disabling
+        _publish_vim_mode_to_tui(None)
         return VimResult(
             success=True,
             message="Vim mode disabled.",
@@ -137,6 +178,9 @@ def set_vim_mode(mode: VimMode) -> VimResult:
 
     _vim_config.current_mode = mode
     save_vim_config(_vim_config)
+
+    # Publish to TUI state for UI integration
+    _publish_vim_mode_to_tui(mode)
 
     return VimResult(
         success=True,
@@ -199,3 +243,51 @@ def format_vim_text(result: VimResult) -> str:
         lines.append("Use /vim to enable vim mode")
 
     return "\n".join(lines)
+
+
+# ── TUI state helpers ────────────────────────────────────────────────────────
+
+
+def get_tui_vim_mode() -> str:
+    """Get current vim mode from TUI state.
+
+    Returns:
+        Uppercase vim mode string ('INSERT', 'NORMAL', 'VISUAL') or 'INSERT' if not in vim mode
+    """
+    snapshot = _get_tui_state_snapshot()
+    if snapshot is None:
+        return "INSERT"
+    # Return the TUI vim mode, defaulting to INSERT
+    return snapshot.vim_mode or "INSERT"
+
+
+def is_vim_active_in_tui() -> bool:
+    """Check if vim mode is currently active in the TUI.
+
+    Vim is considered active in TUI if the TUI vim mode is not INSERT
+    (meaning user is in NORMAL or VISUAL mode).
+
+    Returns:
+        True if vim mode is active in TUI
+    """
+    mode = get_tui_vim_mode()
+    return mode != "INSERT"
+
+
+def get_vim_status_for_tui() -> dict:
+    """Get vim status information for TUI display.
+
+    Returns:
+        Dictionary with vim status suitable for TUI rendering
+    """
+    global _vim_config
+    _vim_config = load_vim_config()
+
+    tui_mode = get_tui_vim_mode()
+
+    return {
+        "vim_enabled": _vim_config.enabled,
+        "vim_mode": tui_mode,
+        "short_label": tui_mode[:3] if _vim_config.enabled else "",
+        "status_text": f"VIM {_vim_config.current_mode.value.upper()}" if _vim_config.enabled else "",
+    }

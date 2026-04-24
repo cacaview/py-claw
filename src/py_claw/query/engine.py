@@ -169,12 +169,31 @@ class BackendTurnExecutor:
             assistant_parts = [c.text for c in chunks if c.type == "text_delta"]
             stop_reason = next((c.stop_reason for c in reversed(chunks) if c.type == "stop_reason"), "end_turn")
             assistant_text = "".join(assistant_parts)
+
+            # Extract tool_calls from tool_calls chunks
+            tool_calls: list[BackendToolCall] = []
+            for chunk in chunks:
+                if chunk.type == "tool_calls":
+                    import json
+                    try:
+                        tc_list = json.loads(chunk.text)
+                        for tc in tc_list:
+                            tool_calls.append(BackendToolCall(
+                                tool_name=tc.get("tool_name", ""),
+                                arguments=tc.get("arguments", {}),
+                                tool_use_id=tc.get("tool_use_id"),
+                                parent_tool_use_id=tc.get("parent_tool_use_id"),
+                            ))
+                    except (json.JSONDecodeError, Exception):
+                        pass
+
             result = BackendTurnResult(
                 assistant_text=assistant_text,
                 stop_reason=stop_reason,
                 usage=_build_usage(prepared=prepared, assistant_text=assistant_text, backend_type="api"),
                 model_usage=_build_model_usage(prepared=prepared, assistant_text=assistant_text, total_cost_usd=0.0),
                 duration_api_ms=0.0,
+                tool_calls=tool_calls,
             )
             yield result
         else:

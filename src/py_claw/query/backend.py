@@ -403,31 +403,46 @@ class ApiQueryBackend:
         api_url: str,
         model: str | None = None,
         max_output_tokens: int = 8192,
+        tools: list[dict[str, object]] | None = None,
     ) -> None:
         self._api_key = api_key
         self._api_url = api_url
         self._model = model or "gpt-5.4"
         self._max_output_tokens = max_output_tokens
+        self._tools = tools
 
     def run_turn(self, prepared: PreparedTurn, context: QueryTurnContext) -> BackendTurnResult:
-        return _api_request(prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url)
+        return _api_request(prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools)
 
     def run_turn_streaming(
         self, prepared: PreparedTurn, context: QueryTurnContext
     ) -> Iterator[BackendChunk]:
         return _api_request_streaming(
-            prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url
+            prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools
         )
 
 
 def _parse_sse_stream(sse_text: str) -> tuple[str, str]:
     """Parse SSE-formatted text into assistant content and stop reason.
 
-    Handles OpenAI Responses API SSE format with event lines prefixed by "data:".
+    Handles both OpenAI Responses API SSE format and OpenAI Chat Completions SSE format.
     Returns (assistant_text, stop_reason).
+    """
+    assistant_text, stop_reason, _ = _parse_sse_stream_with_tools(sse_text)
+    return assistant_text, stop_reason
+
+
+def _parse_sse_stream_with_tools(sse_text: str) -> tuple[str, str, list[BackendToolCall]]:
+    """Parse SSE-formatted text into assistant content, stop reason, and tool calls.
+
+    Handles both OpenAI Responses API SSE format and OpenAI Chat Completions SSE format.
+    Returns (assistant_text, stop_reason, tool_calls).
     """
     assistant_parts: list[str] = []
     stop_reason = "end_turn"
+    tool_calls: list[BackendToolCall] = []
+    current_tool_call: dict[str, Any] | None = None
+    current_tool_args = ""
 
     for line in sse_text.split("\n"):
         if not line.startswith("data:"):
@@ -436,16 +451,86 @@ def _parse_sse_stream(sse_text: str) -> tuple[str, str]:
             event = json.loads(line[5:])
         except json.JSONDecodeError:
             continue
+
+        # Handle OpenAI Responses API format
         event_type = event.get("type")
         if event_type == "content_block_delta":
             delta = event.get("delta", {})
             if delta.get("type") == "text_delta":
                 assistant_parts.append(delta.get("text", ""))
+            elif delta.get("type") == "input_json_delta":
+                # Tool call arguments in streaming mode
+                if current_tool_call is not None:
+                    current_tool_args += delta.get("partial_json", "")
+        elif event_type == "content_block_stop":
+            # Finish current tool call if any
+            if current_tool_call is not None and current_tool_args:
+                try:
+                    args = json.loads(current_tool_args)
+                    current_tool_call["args"] = args
+                except json.JSONDecodeError:
+                    pass
+                tool_calls.append(BackendToolCall(
+                    tool_name=current_tool_call["name"],
+                    arguments=current_tool_call.get("args", {}),
+                ))
+            current_tool_call = None
+            current_tool_args = ""
+        elif event_type == "tool_use":
+            # Start of a tool call
+            name = event.get("name")
+            id_ = event.get("id")
+            current_tool_call = {"name": name, "id": id_}
+            current_tool_args = ""
         elif event_type == "message_stop":
             msg = event.get("message", {})
             stop_reason = msg.get("stop_reason") or "end_turn"
+            # Finalize any remaining tool call
+            if current_tool_call is not None and current_tool_args:
+                try:
+                    args = json.loads(current_tool_args)
+                    current_tool_call["args"] = args
+                except json.JSONDecodeError:
+                    pass
+                tool_calls.append(BackendToolCall(
+                    tool_name=current_tool_call["name"],
+                    arguments=current_tool_call.get("args", {}),
+                ))
+            current_tool_call = None
 
-    return "".join(assistant_parts), stop_reason
+        # Handle OpenAI Chat Completions format
+        elif event.get("object") == "chat.completion.chunk":
+            choices = event.get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                if "content" in delta:
+                    assistant_parts.append(delta.get("content", ""))
+                finish_reason = choices[0].get("finish_reason")
+                if finish_reason:
+                    stop_reason = "end_turn" if finish_reason == "stop" else finish_reason
+                # Handle tool_calls in Chat Completions format
+                if "tool_calls" in delta:
+                    for tc in delta["tool_calls"]:
+                        if tc.get("index", 0) == 0:  # First tool call
+                            if "function" in tc:
+                                if current_tool_call is None:
+                                    current_tool_call = {"name": tc["function"]["name"], "args": ""}
+                                current_tool_args += tc["function"].get("arguments", "")
+                # Check for tool call end
+                if finish_reason == "tool_calls" or (finish_reason == "stop" and current_tool_call):
+                    if current_tool_call is not None and current_tool_args:
+                        try:
+                            args = json.loads(current_tool_args)
+                            tool_calls.append(BackendToolCall(
+                                tool_name=current_tool_call["name"],
+                                arguments=args,
+                            ))
+                        except json.JSONDecodeError:
+                            pass
+                    current_tool_call = None
+                    current_tool_args = ""
+
+    return "".join(assistant_parts), stop_reason, tool_calls
 
 
 def _api_request(
@@ -455,9 +540,10 @@ def _api_request(
     max_output_tokens: int,
     api_key: str,
     api_url: str,
+    tools: list[dict[str, object]] | None = None,
 ) -> BackendTurnResult:
     """Call OpenAI/API-compatible /v1/messages with streaming SSE, parse into BackendTurnResult."""
-    messages: list[dict[str, str]] = _transcript_to_messages(context.transcript)
+    messages = _transcript_to_openai_messages(context.transcript)
     if prepared.query_text:
         messages.append({"role": "user", "content": prepared.query_text})
 
@@ -476,6 +562,8 @@ def _api_request(
     }
     if system:
         body["system"] = system
+    if tools:
+        body["tools"] = tools
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -487,12 +575,12 @@ def _api_request(
         with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
             if resp.status_code != 200:
                 raise RuntimeError(f"Right codes API returned HTTP {resp.status_code}: {resp.text[:200]}")
-            text = resp.text
+            text = resp.read().decode("utf-8")
     except httpx.HTTPError as exc:
         raise RuntimeError(f"Right codes API request failed: {exc}") from exc
 
     # Parse SSE stream
-    assistant_text, stop_reason = _parse_sse_stream(text)
+    assistant_text, stop_reason, tool_calls = _parse_sse_stream_with_tools(text)
 
     return BackendTurnResult(
         assistant_text=assistant_text,
@@ -500,6 +588,7 @@ def _api_request(
         usage=_build_usage(prepared=prepared, assistant_text=assistant_text, backend_type="api"),
         model_usage=_build_model_usage(prepared=prepared, assistant_text=assistant_text, total_cost_usd=0.0),
         duration_api_ms=0.0,
+        tool_calls=tool_calls,
     )
 
 
@@ -510,9 +599,13 @@ def _api_request_streaming(
     max_output_tokens: int,
     api_key: str,
     api_url: str,
+    tools: list[dict[str, object]] | None = None,
 ) -> Iterator[BackendChunk]:
-    """Generator that yields BackendChunk as SSE data arrives."""
-    messages: list[dict[str, str]] = _transcript_to_messages(context.transcript)
+    """Generator that yields BackendChunk as SSE data arrives.
+
+    Accumulates full SSE response and parses it at the end to extract tool_calls properly.
+    """
+    messages: list[dict[str, Any]] = _transcript_to_openai_messages(context.transcript)
     if prepared.query_text:
         messages.append({"role": "user", "content": prepared.query_text})
 
@@ -531,12 +624,17 @@ def _api_request_streaming(
     }
     if system:
         body["system"] = system
+    if tools:
+        body["tools"] = tools
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
+
+    # Accumulate full SSE response for proper tool_calls parsing
+    sse_parts: list[str] = []
 
     try:
         with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
@@ -545,6 +643,7 @@ def _api_request_streaming(
             for line in resp.iter_lines():
                 if not line:
                     continue
+                sse_parts.append(line)
                 if not line.startswith("data:"):
                     continue
                 try:
@@ -564,6 +663,13 @@ def _api_request_streaming(
                     yield BackendChunk(type="stop_reason", stop_reason=stop_reason)
     except httpx.HTTPError as exc:
         raise RuntimeError(f"Right codes API request failed: {exc}") from exc
+
+    # Parse the accumulated SSE to extract tool_calls
+    if sse_parts:
+        sse_text = "\n".join(sse_parts)
+        _, stop_reason, tool_calls = _parse_sse_stream_with_tools(sse_text)
+        if tool_calls:
+            yield BackendChunk(type="tool_calls", text=json.dumps([tc.__dict__ for tc in tool_calls]))
 
 
 class AnthropicQueryBackend:
@@ -667,9 +773,9 @@ class AnthropicQueryBackend:
         )
 
 
-def _transcript_to_messages(transcript: list[object]) -> list[dict[str, str]]:
+def _transcript_to_messages(transcript: list[object]) -> list[dict[str, Any]]:
     """Convert transcript objects to plain dict messages for JSON serialization."""
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     for item in transcript:
         role = getattr(item, "type", None)
         if role == "user" or getattr(item, "role", None) == "user":
@@ -681,6 +787,89 @@ def _transcript_to_messages(transcript: list[object]) -> list[dict[str, str]]:
             if content:
                 messages.append({"role": "assistant", "content": content})
     return messages
+
+
+def _transcript_to_openai_messages(transcript: list[object]) -> list[dict[str, Any]]:
+    """Convert transcript to OpenAI API message format with proper tool result handling.
+
+    Tool results are converted to 'tool' role messages as required by OpenAI API.
+    Assistant tool_use blocks are extracted to the 'tool_calls' field.
+    """
+    messages: list[dict[str, Any]] = []
+    for item in transcript:
+        item_type = getattr(item, "type", None)
+        item_role = getattr(item, "role", None)
+
+        if item_type == "user" or item_role == "user":
+            # Check if this is a tool result (synthetic message with tool_result content)
+            msg = getattr(item, "message", None)
+            if isinstance(msg, dict) and isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        # Convert to OpenAI tool result format
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id", ""),
+                            "content": _format_tool_result_content(block.get("content", "")),
+                        })
+            else:
+                # Regular user message
+                content = _extract_message_content(item)
+                if content:
+                    messages.append({"role": "user", "content": content})
+
+        elif item_type == "assistant" or item_role == "assistant":
+            # Extract tool_use blocks from content and put them in tool_calls field
+            msg = getattr(item, "message", None)
+            assistant_msg: dict[str, Any] = {"role": "assistant"}
+            tool_calls: list[dict[str, Any]] = []
+            text_content: list[str] = []
+
+            if isinstance(msg, dict):
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "tool_use":
+                                # Extract tool_use as Chat Completions tool_call format
+                                tool_calls.append({
+                                    "id": block.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.get("name", ""),
+                                        "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                                    },
+                                })
+                            else:
+                                # Keep other content blocks as text
+                                if block.get("type") == "text":
+                                    text_content.append(block.get("text", ""))
+                        elif isinstance(block, str):
+                            text_content.append(block)
+                elif isinstance(content, str):
+                    text_content.append(content)
+
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+            if text_content:
+                assistant_msg["content"] = "\n".join(text_content)
+            elif not tool_calls:
+                continue  # Skip empty assistant messages
+
+            messages.append(assistant_msg)
+
+    return messages
+
+
+def _format_tool_result_content(content: Any) -> str:
+    """Format tool result content as a string for OpenAI API."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=False)
+    if isinstance(content, list):
+        return json.dumps(content, ensure_ascii=False)
+    return str(content)
 
 
 def _extract_message_content(item: object) -> str | list[dict[str, Any]]:
@@ -743,3 +932,50 @@ def _extract_tool_calls_from_content(content: list[Any]) -> list[BackendToolCall
                 )
             )
     return tool_calls
+
+
+def _pydantic_to_openai_schema(input_model: type) -> dict[str, Any]:
+    """Convert a Pydantic model to OpenAI function parameters schema."""
+    if input_model is None:
+        return {"type": "object", "properties": {}}
+
+    # Get JSON schema from Pydantic model
+    schema = input_model.model_json_schema()
+
+    # Extract properties
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+
+    # Convert to OpenAI format
+    parameters = {
+        "type": "object",
+        "properties": properties,
+    }
+    if required:
+        parameters["required"] = required
+
+    return parameters
+
+
+def tool_definitions_to_openai_tools(
+    tool_definitions: list[tuple[str, type]],
+) -> list[dict[str, Any]]:
+    """Convert a list of (name, Pydantic model) to OpenAI tools format.
+
+    Args:
+        tool_definitions: List of (tool_name, input_model_class) tuples
+
+    Returns:
+        List of OpenAI tool dictionaries
+    """
+    tools = []
+    for name, input_model in tool_definitions:
+        schema = _pydantic_to_openai_schema(input_model)
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": schema,
+            },
+        })
+    return tools

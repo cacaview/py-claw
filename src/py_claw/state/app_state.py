@@ -47,6 +47,12 @@ class TUIState:
     speculation_boundary: str = ""  # boundary type or ""
     speculation_tool_count: int = 0
 
+    # Voice state
+    voice_state: str = "idle"  # "idle" | "recording" | "transcribing"
+    voice_error: str | None = None
+    voice_interim_transcript: str = ""
+    voice_final_transcript: str = ""
+
 
 @dataclass
 class UIState:

@@ -315,3 +315,88 @@ async def extract_current_session_metadata() -> SessionMetadata | None:
         SessionMetadata, or None
     """
     return await get_session_storage_engine().extract_metadata()
+
+
+async def load_session_for_resume(
+    session_id: str,
+    project_path: str | None = None,
+) -> dict | None:
+    """Load a session file for resume.
+
+    Reads the full session JSONL and returns the deserialized messages
+    along with metadata. Used by the ResumeScreen to restore a session.
+
+    Args:
+        session_id: Session UUID to load
+        project_path: Optional project path to search within
+
+    Returns:
+        dict with keys: messages (list[dict]), session_id, agent_name,
+        agent_color, custom_title, file_history_snapshots, content_replacements,
+        worktree_session, context_collapse_commits, context_collapse_snapshot
+        Returns None if the session cannot be loaded.
+    """
+    from py_claw.services.session_storage.common import resolve_session_file_path
+
+    # Resolve the session file path
+    resolved = resolve_session_file_path(session_id, project_path)
+    if not resolved:
+        return None
+
+    try:
+        # Read all lines from the session file
+        messages: list[dict] = []
+        with open(resolved.file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    messages.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        if not messages:
+            return None
+
+        # Deserialize messages using conversation_recovery
+        from py_claw.utils.conversation_recovery import deserialize_messages
+
+        deserialized = deserialize_messages(messages)
+
+        # Extract metadata from the session file
+        from py_claw.services.session_storage.common import extract_last_json_string_field
+
+        custom_title = None
+        agent_name = None
+        agent_color = None
+
+        # Read the tail to extract metadata
+        try:
+            import os
+            file_size = os.path.getsize(resolved.file_path)
+            if file_size > 0:
+                from py_claw.services.session_storage.common import read_session_lite
+                lite = read_session_lite(resolved.file_path)
+                if lite:
+                    custom_title = extract_last_json_string_field(lite.tail, "customTitle")
+                    agent_name = extract_last_json_string_field(lite.tail, "agentName")
+                    agent_color = extract_last_json_string_field(lite.tail, "agentColor")
+        except Exception:
+            pass  # Metadata extraction is best-effort
+
+        return {
+            "messages": deserialized,
+            "session_id": session_id,
+            "agent_name": agent_name,
+            "agent_color": agent_color,
+            "custom_title": custom_title,
+            "file_history_snapshots": None,
+            "content_replacements": None,
+            "worktree_session": None,
+            "context_collapse_commits": None,
+            "context_collapse_snapshot": None,
+        }
+
+    except Exception:
+        return None

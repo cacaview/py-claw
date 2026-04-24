@@ -9,13 +9,13 @@ Provides reactive state subscription helpers so Textual widgets can:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from py_claw.state import get_global_store
 
 
-@datlass
+@dataclass
 class TUIStateSnapshot:
     """Snapshot of TUI state at a point in time."""
     prompt_mode: str = "normal"
@@ -24,15 +24,19 @@ class TUIStateSnapshot:
     has_suggestions: bool = False
     selected_suggestion_index: int = -1
     suggestion_count: int = 0
-    queued_prompts: list[str] = list()
+    queued_prompts: list[str] = field(default_factory=list)
     stashed_prompt: Optional[str] = None
     pasted_content_id: Optional[str] = None
     pasted_content_label: Optional[str] = None
     narrow_terminal: bool = False
-    active_overlays: frozenset = frozenset()
+    active_overlays: frozenset = field(default_factory=frozenset)
     speculation_status: str = "idle"
     speculation_boundary: str = ""
     speculation_tool_count: int = 0
+    voice_state: str = "idle"
+    voice_error: Optional[str] = None
+    voice_interim_transcript: str = ""
+    voice_final_transcript: str = ""
 
 
 class TUIStateSubscriber:
@@ -181,6 +185,39 @@ def update_tui_speculation(
     store.update(updater)
 
 
+def update_tui_voice_state(state: str, error: str | None = None) -> None:
+    """Update voice state in the global store.
+
+    Args:
+        state: Voice state - "idle", "recording", or "transcribing"
+        error: Optional error message if voice failed
+    """
+    store = get_global_store()
+    def updater(s: Any) -> Any:
+        def inner(t: Any) -> None:
+            t.voice_state = state
+            t.voice_error = error
+        return _with_tui(s, inner)
+    store.update(updater)
+
+
+def update_tui_voice_transcript(interim: str = "", final: str = "") -> None:
+    """Update voice transcript in the global store.
+
+    Args:
+        interim: Interim transcription text (streaming)
+        final: Final transcript (after voice submission)
+    """
+    store = get_global_store()
+    def updater(s: Any) -> Any:
+        def inner(t: Any) -> None:
+            t.voice_interim_transcript = interim
+            if final:
+                t.voice_final_transcript = final
+        return _with_tui(s, inner)
+    store.update(updater)
+
+
 # ─── Internal helpers ──────────────────────────────────────────────────────
 
 
@@ -203,6 +240,10 @@ def _get_tui_snapshot(state: Any) -> TUIStateSnapshot:
         speculation_status=tui.speculation_status,
         speculation_boundary=tui.speculation_boundary,
         speculation_tool_count=tui.speculation_tool_count,
+        voice_state=tui.voice_state,
+        voice_error=tui.voice_error,
+        voice_interim_transcript=tui.voice_interim_transcript,
+        voice_final_transcript=tui.voice_final_transcript,
     )
 
 

@@ -62,10 +62,21 @@ def _build_state(args: argparse.Namespace) -> RuntimeState:
     else:
         cfg = load_config()
         if cfg.api.is_configured():
+            # Get tool definitions from tool_runtime
+            tool_defs: list[tuple[str, type] | None] = []
+            if state.tool_runtime and state.tool_runtime.registry:
+                for tool in state.tool_runtime.registry.values():
+                    tool_defs.append((tool.definition.name, tool.definition.input_model))
+
+            # Convert to OpenAI tools format
+            from py_claw.query.backend import tool_definitions_to_openai_tools
+            tools = tool_definitions_to_openai_tools([d for d in tool_defs if d is not None]) if tool_defs else None
+
             state.query_backend = ApiQueryBackend(
                 api_key=cfg.api.api_key,
                 api_url=cfg.api.api_url,
                 model=cfg.api.model,
+                tools=tools,
             )
     return state
 

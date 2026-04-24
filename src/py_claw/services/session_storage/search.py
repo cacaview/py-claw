@@ -290,3 +290,39 @@ async def list_session_files(
     results.sort(key=lambda x: x[0], reverse=True)
 
     return [path for _, path in results[:limit]]
+
+
+def format_session_timestamp(mtime: float) -> str:
+    """Format a session modified time as relative string.
+
+    Args:
+        mtime: Modified time as Unix timestamp
+
+    Returns:
+        Human-readable relative time string (e.g., "2h ago", "3d ago")
+    """
+    from datetime import datetime, timedelta
+
+    dt = datetime.fromtimestamp(mtime)
+    now = datetime.now()
+    delta = now - dt
+
+    if delta < timedelta(minutes=1):
+        return "just now"
+    if delta < timedelta(hours=1):
+        mins = int(delta.total_seconds() / 60)
+        return f"{mins}m ago"
+    if delta < timedelta(days=1):
+        hours = int(delta.total_seconds() / 3600)
+        return f"{hours}h ago"
+    if delta < timedelta(days=7):
+        days = delta.days
+        return f"{days}d ago"
+    if delta < timedelta(days=30):
+        weeks = delta.days // 7
+        return f"{weeks}w ago"
+    if delta < timedelta(days=365):
+        months = delta.days // 30
+        return f"{months}mo ago"
+    years = delta.days // 365
+    return f"{years}y ago"

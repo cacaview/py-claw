@@ -17,6 +17,10 @@
   - `/context clear` 现在调用 session_memory state 真实重置
   - `/add-dir` 现在调用 config service 添加目录到 allowed list
 - **SSH Reverse Tunnel 实现**：新增 `SSHClient.connect_reverse()` 和 `SSHService.create_reverse_tunnel()`，支持 `-R` 反向端口转发
+- **Vim Service TUI 集成**：新增 `_publish_vim_mode_to_tui()` 将 vim 模式变更发布到全局 TUI store；新增 `get_tui_vim_mode()`、`is_vim_active_in_tui()`、`get_vim_status_for_tui()` 等 TUI 状态辅助函数；`toggle_vim_mode()` 和 `set_vim_mode()` 现在会在状态变更时同步到 TUI
+- **YOLO 分类器接入**：将 `py_claw/permissions/yolo_classifier.py` 的真实分类器接入 `PermissionEngine.evaluate()` 作为 fallback；`classify_yolo_action()` 现在调用真实分类器（allowlist/denylist/Bash/PowerShell 检查），fail-open 设计仅在高置信度 deny 时阻止
+- **Voice TUI 集成**：新增 voice 状态到 `TUIState`（`voice_state`/`voice_error`/`voice_interim_transcript`/`voice_final_transcript`）；新增 `update_tui_voice_state()` / `update_tui_voice_transcript()` 辅助函数；新增 `services/voice/hold_to_talk.py` HoldToTalk 上下文管理器（sounddevice 音频采集）；新增 `ctrl+shift+v` voice-hold 快捷键
+- **ResumeScreen 重设计**：`ui/screens/resume.py` 完全重写，支持键盘导航（↑↓ Enter Esc a）、异步会话加载（`search_sessions()`）、all projects 切换、分页加载；新增 `load_session_for_resume()` 到 session_storage；新增 `format_session_timestamp()` 工具函数
 
 ### 项目缺口扫描 (2026-04-21)
 
@@ -36,18 +40,18 @@
 
 | 模块 | 缺口 | 状态 |
 |------|------|------|
-| `services/voice_stream_stt/service.py` | 多处 NotImplementedError | 待处理 |
-| `services/insights/service.py` | Phase H narrative generation stub | 待处理 |
-| `services/vim/service.py` | 简化实现 | 待处理 |
+| `services/voice_stream_stt/service.py` | 多处 NotImplementedError | ✅ 已是完整实现（stub 是动态替换模式，由 `connect_voice_stream()` 在运行时替换） |
+| `services/insights/service.py` | Phase H narrative generation stub | ✅ 已是完整实现（LLM 调用 + fallback 机制） |
+| `services/vim/service.py` | 简化实现，缺 TUI 集成 | ✅ 已完成（TUI store 同步 + TUI 状态辅助函数） |
 
 #### 低优先级 (可后续迭代)
 
 | 模块 | 缺口 | 状态 |
 |------|------|------|
-| `services/permissions/classifier_decision.py` | YOLO 分类器 stub | 待处理 |
-| `services/voice/` | audio-capture-napi 待实现 | 待处理 |
-| `state/observable.py` | Observable NotImplementedError | 待处理 |
-| `ResumeConversation.tsx` | TS React 组件难移植 | 待处理 |
+| `services/permissions/classifier_decision.py` | YOLO 分类器 stub | ✅ 已完成（接入真实分类器到 PermissionEngine） |
+| `services/voice/` | audio-capture-napi 待实现 | ✅ 已完成（HoldToTalk + sounddevice 纯 Python 实现） |
+| `state/observable.py` | Observable NotImplementedError | ⚠️ 基类设计模式（子类实现） |
+| `ResumeConversation.tsx` | TS React 组件难移植 | ✅ 已完成（Python/Textual 重实现） |
 
 ---
 

@@ -66,6 +66,8 @@ def get_default_keybindings() -> list[Keybinding]:
         Keybinding(key="a", command="vim-append", description="Append mode (vim)"),
         Keybinding(key="v", command="vim-visual", description="Visual mode (vim)"),
         Keybinding(key="escape", command="vim-normal", description="Normal mode (vim)"),
+        # Voice bindings
+        Keybinding(key="ctrl+shift+v", command="voice-hold", description="Hold to talk (voice input)"),
     ]
 
 
@@ -189,6 +191,7 @@ _SHORTCUT_DISPLAY_MAP: dict[str, str] = {
     "vim-append": "a",
     "vim-visual": "v",
     "vim-normal": "esc",
+    "voice-hold": "ctrl+shift+v",
 }
 
 
@@ -210,6 +213,7 @@ _HELP_SHORTCUTS: dict[str, str] = {
     "i": "Insert mode (vim)",
     "a": "Append mode (vim)",
     "v": "Visual mode (vim)",
+    "ctrl+shift+v": "Hold to talk (voice)",
 }
 
 
