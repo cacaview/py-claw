@@ -90,5 +90,5 @@ py-claw/
 - [src/py_claw/CLAUDE.md](src/py_claw/CLAUDE.md) — Python 运行时详细文档
 - [ClaudeCode-main/CLAUDE.md](ClaudeCode-main/CLAUDE.md) — TypeScript 参考树导航
 
-##友情链接
+## 友情链接
 [Linuxdo](https://linux.do)
