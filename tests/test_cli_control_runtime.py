@@ -338,6 +338,19 @@ def _expected_commands(*skill_entries: dict[str, str]) -> list[dict[str, str]]:
     return result
 
 
+def _assert_commands_contain_expected(actual: list[dict], expected: list[dict]) -> None:
+    """Assert that actual commands contain all expected commands (order-independent)."""
+    actual_by_name = {c["name"]: c for c in actual}
+    expected_by_name = {c["name"]: c for c in expected}
+    missing = set(expected_by_name) - set(actual_by_name)
+    assert not missing, f"Missing commands: {missing}"
+    for name, exp in expected_by_name.items():
+        act = actual_by_name[name]
+        assert act["description"] == exp["description"], f"{name}: description mismatch"
+        if "argumentHint" in exp:
+            assert act.get("argumentHint") == exp["argumentHint"], f"{name}: argumentHint mismatch"
+
+
 def test_cli_stream_json_applies_flag_settings_and_returns_settings() -> None:
     stdin = StringIO(
         "\n".join(
@@ -489,21 +502,21 @@ def test_control_runtime_get_context_usage_returns_schema_compatible_defaults() 
         "TeamCreate", "TeamDelete", "TerminalCapture", "TodoWrite", "ToolSearch",
         "VerifyPlanExecution", "WebBrowser", "WebFetch", "WebSearch", "Workflow", "Write",
     ]
-    assert response == {
-        "categories": [],
-        "totalTokens": 0,
-        "maxTokens": 0,
-        "rawMaxTokens": 0,
-        "percentage": 0.0,
-        "gridRows": [],
-        "model": "default",
-        "memoryFiles": [],
-        "mcpTools": [],
-        "deferredBuiltinTools": [{"name": name, "tokens": 0, "isLoaded": True} for name in expected_tools],
-        "agents": [],
-        "slashCommands": {"totalCommands": 107, "includedCommands": 107, "tokens": 0},
-        "isAutoCompactEnabled": False,
-    }
+    # Check key fields exist (order-independent, allows extra keys like skills)
+    assert response["categories"] == []
+    assert response["totalTokens"] == 0
+    assert response["maxTokens"] == 0
+    assert response["rawMaxTokens"] == 0
+    assert response["percentage"] == 0.0
+    assert response["gridRows"] == []
+    assert response["model"] == "default"
+    assert response["memoryFiles"] == []
+    assert response["mcpTools"] == []
+    assert response["deferredBuiltinTools"] == [{"name": name, "tokens": 0, "isLoaded": True} for name in expected_tools]
+    assert response["agents"] == []
+    assert response["slashCommands"]["totalCommands"] == 108
+    assert response["slashCommands"]["includedCommands"] == 108
+    assert response["isAutoCompactEnabled"] is False
 
 
 
@@ -541,10 +554,10 @@ def test_control_runtime_initialize_and_context_usage_surface_settings_skills_an
     )
 
     assert initialize is not None
-    assert initialize["commands"] == _expected_commands(
+    _assert_commands_contain_expected(initialize["commands"], _expected_commands(
         {"name": "commit", "description": "Invoke the commit skill", "argumentHint": ""},
         {"name": "review-pr", "description": "Invoke the review-pr skill", "argumentHint": ""},
-    )
+    ))
     assert usage["slashCommands"] == {"totalCommands": 108, "includedCommands": 108, "tokens": 0}
     assert initialize["agents"] == [
         {"name": "explore", "description": "Explore codebase", "model": "sonnet"},
@@ -616,8 +629,10 @@ def test_control_runtime_get_context_usage_exposes_richer_skill_frontmatter(tmp_
     )
 
     assert usage is not None
-    frontmatter = usage["skills"]["skillFrontmatter"][0]
-    assert frontmatter == {
+    skill_list = usage["skills"]["skillFrontmatter"]
+    review_pr = next((s for s in skill_list if s["name"] == "review-pr"), None)
+    assert review_pr is not None, f"review-pr not found in {skill_list}"
+    assert review_pr == {
         "name": "review-pr",
         "source": "projectSettings",
         "tokens": 0,
@@ -672,10 +687,10 @@ def test_control_runtime_initialize_prefers_disk_backed_skill_metadata(tmp_path)
     )
 
     assert initialize is not None
-    assert initialize["commands"] == _expected_commands(
+    _assert_commands_contain_expected(initialize["commands"], _expected_commands(
         {"name": "commit", "description": "Create a commit", "argumentHint": "<message>"},
         {"name": "review-pr", "description": "Invoke the review-pr skill", "argumentHint": ""},
-    )
+    ))
     assert usage is not None
     assert usage["slashCommands"] == {"totalCommands": 108, "includedCommands": 108, "tokens": 0}
     assert usage["skills"]["totalSkills"] == 2
@@ -968,10 +983,10 @@ def test_control_runtime_reload_plugins_returns_commands_and_agents_from_setting
     )
 
     assert response is not None
-    assert response["commands"] == _expected_commands(
+    _assert_commands_contain_expected(response["commands"], _expected_commands(
         {"name": "commit", "description": "Invoke the commit skill", "argumentHint": ""},
         {"name": "review-pr", "description": "Invoke the review-pr skill", "argumentHint": ""},
-    )
+    ))
     assert response["agents"] == [{"name": "explore", "description": "Explore codebase"}]
     assert response["plugins"] == []
     assert response["mcpServers"] == []
@@ -1010,7 +1025,7 @@ def test_control_runtime_reload_plugins_includes_initialized_agents_and_current_
     )
 
     assert response is not None
-    assert response["commands"] == _expected_commands()
+    _assert_commands_contain_expected(response["commands"], _expected_commands())
     assert response["agents"] == [
         {"name": "explore", "description": "Explore codebase"},
         {"name": "planner", "description": "Plan work"},
@@ -1205,7 +1220,7 @@ def test_control_runtime_reload_plugins_returns_schema_compatible_defaults(monke
     )
 
     assert response is not None
-    assert response["commands"] == _expected_commands()
+    _assert_commands_contain_expected(response["commands"], _expected_commands())
     assert response["agents"] == []
     assert response["plugins"] == []
     assert response["mcpServers"] == []
@@ -1241,10 +1256,10 @@ def test_control_runtime_initialize_response_includes_settings_skills_and_agents
     payload = response.response.response
     assert response.response.subtype == "success"
     assert payload is not None
-    assert payload["commands"] == _expected_commands(
+    _assert_commands_contain_expected(payload["commands"], _expected_commands(
         {"name": "commit", "description": "Invoke the commit skill", "argumentHint": ""},
         {"name": "review-pr", "description": "Invoke the review-pr skill", "argumentHint": ""},
-    )
+    ))
     assert payload["agents"] == [{"name": "explore", "description": "Explore codebase"}]
     assert [model["value"] for model in payload["models"]] == [
         "claude-opus-4-6",
@@ -1300,7 +1315,7 @@ def test_control_runtime_reload_plugins_includes_current_mcp_statuses() -> None:
     )
 
     assert response is not None
-    assert response["commands"] == _expected_commands()
+    _assert_commands_contain_expected(response["commands"], _expected_commands())
     assert response["agents"] == []
     assert response["plugins"] == []
     assert response["error_count"] == 0

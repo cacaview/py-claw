@@ -43,7 +43,48 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-3-opus": 200_000,
     "claude-3-sonnet": 200_000,
     "claude-3-haiku": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "claude-opus-4-8": 200_000,
+    "claude-opus-4-7": 200_000,
+    "claude-fable-5": 200_000,
 }
+
+# Partial name fragments that map to a known context window.
+# Order matters: more specific fragments are checked first.
+_PARTIAL_MODEL_CONTEXT_WINDOWS: list[tuple[str, int]] = [
+    ("opus-4-8", 200_000),
+    ("opus-4-7", 200_000),
+    ("sonnet-4-6", 200_000),
+    ("sonnet-4-5", 200_000),
+    ("haiku-4-5", 200_000),
+    ("fable-5", 200_000),
+    ("opus", 200_000),
+    ("sonnet", 200_000),
+    ("haiku", 200_000),
+    ("fable", 200_000),
+]
+
+
+def _context_window_for_model(model: str) -> int:
+    """Look up context window for a model, with partial-name fallback.
+
+    Tries exact match first, then substring match against
+    ``_PARTIAL_MODEL_CONTEXT_WINDOWS``.  Returns 200 000 as the
+    ultimate default for any unknown Claude model.
+    """
+    exact = MODEL_CONTEXT_WINDOWS.get(model)
+    if exact is not None:
+        return exact
+    exact = DEFAULT_CONTEXT_WINDOWS.get(model)
+    if exact is not None:
+        return exact
+    model_lower = model.lower()
+    for fragment, window in _PARTIAL_MODEL_CONTEXT_WINDOWS:
+        if fragment in model_lower:
+            return window
+    return 200_000
 
 
 @dataclass
@@ -83,10 +124,7 @@ def compute_effective_threshold(
 
     # Determine context window
     if context_window is None:
-        context_window = MODEL_CONTEXT_WINDOWS.get(
-            model,
-            DEFAULT_CONTEXT_WINDOWS.get(model, 200_000),
-        )
+        context_window = _context_window_for_model(model)
 
     effective_threshold = context_window - config.compact_token_reserve
 

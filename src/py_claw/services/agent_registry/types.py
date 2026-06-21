@@ -43,6 +43,12 @@ class BuiltInAgentDefinition:
     # Additional agent config
     extra: dict[str, Any] = field(default_factory=dict)
 
+    # Permission mode override (e.g., "dontAsk")
+    permission_mode: str | None = None
+
+    # Whether this agent runs in background by default
+    background: bool = False
+
     def to_agent_definition(self) -> dict[str, Any]:
         """Convert to dict compatible with AgentDefinition schema."""
         result = {
@@ -53,5 +59,9 @@ class BuiltInAgentDefinition:
             "tools": self.tools,
             "disallowedTools": self.disallowed_tools,
         }
+        if self.permission_mode is not None:
+            result["permissionMode"] = self.permission_mode
+        if self.background:
+            result["background"] = True
         result.update(self.extra)
         return result

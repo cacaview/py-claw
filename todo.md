@@ -1,6 +1,24 @@
 # TODO — py-claw 工作进度
 
-> 更新日期：2026-04-21
+> 更新日期：2026-06-21
+
+---
+
+## 2026-06-21 变更记录
+
+### 已完成
+
+- **Cost Tracker 服务**：新增 `services/cost_tracker.py`，实现 per-model pricing（Opus/Sonnet/Haiku）、session cost accumulation、`/cost` 命令报告格式化，支持 cost budget 和 token budget 检查
+- **Stop Hooks**：新增 `query/stop_hooks.py`，实现 post-model stop hook dispatch（Stop/SubagentStop 事件），支持 blocking errors、continuation control
+- **Auto-Compact Integration**：新增 `services/compact/auto_compact_integration.py`，将 compact 服务接入 turn loop，自动检测并触发上下文压缩
+- **Query Engine 增强**：`query/engine.py` 新增 `rewind_messages`（对话回退）、`_run_stop_hooks`、`_check_budget_and_maybe_compact`、`_check_auto_compact` 方法
+- **Backend Real Cost**：`query/backend.py` 的 AnthropicQueryBackend 改为从 API response 提取真实 token 数并计算成本
+- **CLI Runtime Cost 字段**：`cli/runtime.py` 的 `RuntimeState` 新增 session cost/token/budget 等 9 个追踪字段
+- **Commands 改进**：`commands.py` 的 `/rewind` 使用公共 API + hook dispatch；`/cost` 使用 format_cost_report
+- **Built-in Agents 扩展**：新增 `verification`（代码变更验证 agent）和 `claude-code-guide`（Claude Code 使用指南 agent），共 6 种内置 agent
+- **Auto Trigger 模型扩展**：新增 claude-sonnet-4-6/4-5、claude-haiku-4-5、claude-opus-4-8/4-7、claude-fable-5 模型条目及 partial name fragments
+- **Commit Encoding Fix**：`services/commit/service.py` 的 `_run_git_command()` 添加 `encoding="utf-8", errors="replace"` 修复 Windows GBK 解码错误
+- **测试补全**：新增 6 个测试文件（test_cost_tracker、test_stop_hooks、test_auto_compact_integration、test_token_budget、test_rewind、test_builtin_agents），140+ 新测试；总计 2030 测试通过，0 失败
 
 ---
 
@@ -349,5 +367,5 @@
 
 1. **TUI 不要再走两套壳层**：现有 `PyClawApp` + `REPLScreen` 架构已收敛，继续在其内迭代
 2. **Textual 不等于 Ink/React**：TS 的 hook/context 模式不能直接翻译，要按 Textual 的 widget/message/reactive 模型重新建模
-3. **Python 测试注意编码**：Windows 下 pytest 可能遇到 GBK 解码问题，输出捕获时注意
+3. **Python 测试注意编码**：Windows 下 subprocess 默认 GBK，已在 services/commit/service.py 等处强制 encoding="utf-8", errors="replace"；测试输出捕获仍需注意
 4. **Shell completion Windows 降级**：Windows 下 `get_shell_type()` 返回 `UNKNOWN`，`get_shell_completions()` 静默返回空列表——预期行为

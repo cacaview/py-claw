@@ -1778,46 +1778,8 @@ def _cost_handler(
     transcript_size: int,
 ) -> str:
     """Show token usage and cost estimates."""
-    query_runtime = state.query_runtime
-    if query_runtime is None:
-        return "Cost tracking is not available. Query runtime is not initialized."
-
-    # Get usage from runtime state if available
-    total_input_tokens = getattr(state, "_total_input_tokens", 0)
-    total_output_tokens = getattr(state, "_total_output_tokens", 0)
-    total_cost = getattr(state, "_total_cost", 0.0)
-
-    model = state.model or settings.effective.get("model") or "default"
-
-    # Estimate cost based on model (simplified)
-    # Actual pricing varies by model; these are approximate
-    cost_per_1k_input = {
-        "claude-opus-4-6": 0.015,
-        "claude-sonnet-4-6": 0.003,
-        "claude-haiku-4-5": 0.00025,
-        "default": 0.001,
-    }
-    cost_per_1k_output = {
-        "claude-opus-4-6": 0.075,
-        "claude-sonnet-4-6": 0.015,
-        "claude-haiku-4-5": 0.00125,
-        "default": 0.005,
-    }
-
-    input_cost = total_input_tokens / 1000 * cost_per_1k_input.get(model, cost_per_1k_input["default"])
-    output_cost = total_output_tokens / 1000 * cost_per_1k_output.get(model, cost_per_1k_output["default"])
-    estimated = input_cost + output_cost
-
-    lines = [
-        f"Model: {model}",
-        f"Input tokens: {total_input_tokens:,}",
-        f"Output tokens: {total_output_tokens:,}",
-        f"Total tokens: {total_input_tokens + total_output_tokens:,}",
-        f"Estimated cost: ${estimated:.4f}",
-    ]
-    if transcript_size > 0:
-        lines.append(f"Transcript messages: {transcript_size}")
-    return "\n".join(lines)
+    from py_claw.services.cost_tracker import format_cost_report
+    return format_cost_report(state)
 
 
 def _terminal_setup_handler(
@@ -2181,33 +2143,41 @@ def _rewind_handler(
     transcript_size: int,
 ) -> str:
     """Rewind the conversation by N messages."""
-    query_runtime = state.query_runtime
-    if query_runtime is None:
-        return "Rewind is not available. Query runtime is not initialized."
-
-    target = arguments.strip()
-    if not target:
-        return "Usage: /rewind <count> - rewind the conversation by N messages"
+    parts = arguments.strip().split()
+    if not parts:
+        return "Usage: /rewind <count> -- Remove the last N messages from conversation"
 
     try:
-        count = int(target)
+        count = int(parts[0])
     except ValueError:
-        return f"Invalid count: {target}. Must be a number."
+        return f"Error: '{parts[0]}' is not a valid number"
 
     if count <= 0:
-        return "Count must be positive."
+        return "Error: count must be a positive integer"
 
-    # Check if we have a session to rewind
-    if not hasattr(query_runtime, "_message_history") or query_runtime._message_history is None:
-        return "No message history available to rewind."
+    query_runtime = state.query_runtime
+    if query_runtime is None:
+        return "Error: no active query runtime"
 
-    history_len = len(query_runtime._message_history)
-    if count >= history_len:
-        return f"Cannot rewind by {count} messages. History has only {history_len} messages."
+    # Use the public API
+    success, message = query_runtime.rewind_messages(count)
+    if not success:
+        return f"Error: {message}"
 
-    # Perform the rewind (remove last N messages)
-    query_runtime._message_history = query_runtime._message_history[:-count]
-    return f"Rewound conversation by {count} messages. Current history: {len(query_runtime._message_history)} messages."
+    # Fire stop hook for rewind event
+    try:
+        hook_runtime = state.hook_runtime
+        if hook_runtime is not None:
+            hook_runtime.run_stop(
+                settings=settings,
+                cwd=state.cwd,
+                stop_hook_active=False,
+                last_assistant_message=f"[Rewound {count} messages]",
+            )
+    except Exception:
+        pass  # Hook failures should not block rewind
+
+    return message
 
 
 CHANGELOG_URL = "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md"

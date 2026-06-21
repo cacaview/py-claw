@@ -749,16 +749,43 @@ class AnthropicQueryBackend:
         # Extract tool calls
         tool_calls = _extract_tool_calls_from_content(result.content)
 
+        # Extract actual usage from API response
+        usage_data = {}
+        if hasattr(result, 'usage') and result.usage:
+            usage_data = {
+                "input_tokens": getattr(result.usage, 'input_tokens', 0),
+                "output_tokens": getattr(result.usage, 'output_tokens', 0),
+                "cache_read_input_tokens": getattr(result.usage, 'cache_read_input_tokens', 0),
+                "cache_creation_input_tokens": getattr(result.usage, 'cache_creation_input_tokens', 0),
+            }
+
+        # Calculate actual cost from token counts
+        from py_claw.services.cost_tracker import calculate_cost
+        total_cost_usd = calculate_cost(
+            model or self._model or "",
+            usage_data.get("input_tokens", 0),
+            usage_data.get("output_tokens", 0),
+            usage_data.get("cache_read_input_tokens", 0),
+            usage_data.get("cache_creation_input_tokens", 0),
+        )
+
         # Build usage
         usage_dict = _build_usage(
             prepared=prepared,
             assistant_text=assistant_text,
             backend_type="anthropic",
         )
+        # Update with actual token counts from API
+        if usage_data:
+            usage_dict["inputTokens"] = usage_data.get("input_tokens", 0)
+            usage_dict["outputTokens"] = usage_data.get("output_tokens", 0)
+            usage_dict["cacheReadInputTokens"] = usage_data.get("cache_read_input_tokens", 0)
+            usage_dict["cacheCreationInputTokens"] = usage_data.get("cache_creation_input_tokens", 0)
+
         model_usage_dict = _build_model_usage(
             prepared=prepared,
             assistant_text=assistant_text,
-            total_cost_usd=0.0,  # SDK doesn't provide cost in response
+            total_cost_usd=total_cost_usd,
         )
 
         return BackendTurnResult(
@@ -767,7 +794,7 @@ class AnthropicQueryBackend:
             usage=usage_dict,
             model_usage=model_usage_dict,
             duration_api_ms=elapsed_ms,
-            total_cost_usd=0.0,
+            total_cost_usd=total_cost_usd,
             tool_calls=tool_calls,
             prompt_suggestion=None,
         )

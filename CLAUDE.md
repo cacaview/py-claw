@@ -55,7 +55,9 @@ graph TD
     S --> S4["oauth"];
     S --> S5["lsp"];
     S --> S6["remote"];
-    S --> S7["worktree"];
+    S --> S7["worktree"]
+    S --> S8["cost_tracker"]
+    S --> S9["agent_registry"]
     U --> U1["screens"];
     U --> U2["widgets"];
     U --> U3["theme"];
@@ -136,18 +138,18 @@ graph TD
 | `src` | Python | `src/py_claw/cli/main.py` | `tests/` | `pyproject.toml` | Python 主实现高信号已补齐 | Python 源码总入口目录 |
 | `src/py_claw` | Python | `cli/main.py`, `tools/runtime.py` | `tests/test_*.py` | `pyproject.toml` | 核心运行时已深扫 | Python 版 Claude Code 运行时主体 |
 | `src/py_claw/cli` | Python | `main.py`, `control.py` | 根测试覆盖 | 根配置复用 | 4/5 | CLI、控制请求分发、结构化流输入输出 |
-| `src/py_claw/query` | Python | `backend.py`, `engine.py` | 根测试覆盖 | 根配置复用 | 1/2 | Query runtime 层与后端适配 |
+| `src/py_claw/query` | Python | `backend.py`, `engine.py`, `stop_hooks.py` | `tests/test_stop_hooks.py`, `tests/test_rewind.py`, `tests/test_token_budget.py`, `tests/test_auto_compact_integration.py` | 根配置复用 | 4/4 | Query runtime 层与后端适配（含 rewind、stop hooks、budget、auto-compact） |
 | `src/py_claw/schemas` | Python | `control.py`, `common.py` | 根测试覆盖 | 无独立配置 | 2/3 | 统一定义控制协议与消息模型 |
 | `src/py_claw/settings` | Python | `loader.py`, `validation.py` | 根测试覆盖 | `.claude/settings*.json` | 4/5 | 设置加载、校验、深合并 |
 | `src/py_claw/permissions` | Python | `engine.py`, `state.py`, `rules.py` | 根测试覆盖 | 权限规则来自 settings | 3/4 | 权限上下文构建与 allow/ask/deny 判定 |
 | `src/py_claw/tools` | Python | `runtime.py`, `local_fs.py`, `local_shell.py` | `tests/test_tools_runtime.py` | 无独立配置 | 4/4 | 内置工具注册、权限前置与本地执行（含 LSPTool） |
 | `src/py_claw/mcp` | Python | `runtime.py` | `tests/test_mcp_runtime.py` | settings 的 `mcp` 段 | 大部分完成 | MCP server 状态快照、stdio/SSE/WebSocket transport |
-| `src/py_claw/services` | Python | 各子模块 | 各子模块测试 | 各子模块配置 | 基本完成 | 运行时服务层（auth/api/log/debug/stats/bash/session_state/cron/cleanup/suggestions/compact/session_memory/oauth/lsp/agent/ide/doctor/model/permissions/telemetry/sandbox/secure_storage/deep_link/file_persistence/native_installer/powershell/remote/worktree） |
+| `src/py_claw/services` | Python | 各子模块 | 各子模块测试 | 各子模块配置 | 基本完成 | 运行时服务层（auth/api/log/debug/stats/bash/session_state/cron/cleanup/suggestions/compact/session_memory/oauth/lsp/agent/ide/doctor/model/permissions/telemetry/sandbox/secure_storage/deep_link/file_persistence/native_installer/powershell/remote/worktree/cost_tracker/agent_registry） |
 | `src/py_claw/hooks` | Python | `schemas.py`, `runtime.py` | `tests/test_hooks_runtime.py` | settings 的 `hooks` 段 | 2/2 | Hook schema 与命令 hook 运行时 |
 | `src/py_claw/ui` | Python | `textual_app.py` | `tests/test_tui*/**`, `tests/test_tui_textual.py` | textual>=0.50 | ✅ Phase 1-5 完成 + compact layout + shortcut surface | Textual 终端 UI 层（REPL 屏幕、overlay/dialog、设计系统组件） |
 | `src/py_claw/ssh` | Python | `session.py` | 无独立测试 | 无独立配置 | 1/1 | SSH 会话管理 |
 | `src/py_claw/buddy` | Python | `companion.py`, `sprites.py`, `prompt.py` | 无独立测试 | 无独立配置 | 3/3 | Companion sprite 系统、确定性roll、ASCII渲染 |
-| `tests` | Python | `pytest` | 自身 | `tool.pytest.ini_options` | 6/6 | 协议与运行时行为回归 |
+| `tests` | Python | `pytest` | 自身 | `tool.pytest.ini_options` | 6/6 | 协议与运行时行为回归（2030 测试） |
 | `ClaudeCode-main` | TypeScript/Bun | `src/dev-entry.ts` | 未系统扫描 | `package.json`, `tsconfig.json` | 已补 `cli/bridge/commands/services/tools/components` 子系统 | 上游还原参考树 |
 | `ClaudeCode-main/src/cli` | TypeScript | `structuredIO.ts`, `remoteIO.ts` | 未见独立测试结论 | transport/env flags | 子系统级已扫 | 协议 I/O、远程 transport、worker 状态同步 |
 | `ClaudeCode-main/src/bridge` | TypeScript | `bridgeEnabled.ts`, `initReplBridge.ts` | 未见独立测试结论 | feature gates + OAuth + policy | 子系统级已扫 | Remote Control entitlement 与 session/bridge 编排 |
@@ -225,6 +227,7 @@ graph TD
 
 ## 变更记录 (Changelog)
 
+- 2026-06-21：新增 cost_tracker（per-model pricing + session cost）、stop_hooks（post-model stop hook dispatch）、auto_compact_integration（auto-compact wired into turn loop）；RuntimeState 新增 session cost/token/budget 字段；engine.py 新增 rewind_messages/stop_hook/budget/compact；backend.py 真实 cost 计算；commands.py 改进 /rewind 和 /cost；agent_registry 新增 verification + claude-code-guide agent；auto_trigger 新增新模型条目；commit service 修复 encoding；新增 6 个测试文件（140+ 测试），总计 2030 测试通过
 - 2026-04-16：主交互快捷键面补齐完成 — 统一 `services/keybindings/service.py` 的 shortcut source，help menu / status line / footer 不再各自漂移；新增 `PromptInput` `Shift+Tab` mode cycle，并补 `tests/test_tui/test_prompt_input.py`、`tests/test_tui/test_repl_screen.py`、`tests/test_tui/test_overlays.py` 回归覆盖（52 个测试通过）
 - 2026-04-16：窄屏 / 矮屏布局策略优化完成 — `textual_app.py` 不再在 `<80` / `<20` 时直接隐藏 `#pi-mode-bar` / `#repl-footer`；`REPLScreen` 统一分发 compact layout；`PromptInput` / `PromptFooter` 新增 `compact_mode` 并保留最小 mode/hint/suggestion/help 反馈；新增 responsive TUI 回归覆盖并刷新 `todo.md` 与 UI 文档
 - 2026-04-16：主 REPL overlay 覆盖面补齐 — 新增 `tests/test_tui/test_overlays.py`（18 个测试通过），覆盖 Help / History Search / Quick Open / Model Picker / TasksPanel 的打开、关闭、互斥与选择结果回填；补 `PromptDialog` / `PermissionDialog` 最小交互验证；同步刷新 `todo.md`、根 `CLAUDE.md` 与 `src/py_claw/ui/CLAUDE.md`

@@ -39,6 +39,9 @@
 - `hooks/runtime.py`：命令 hook 调度与权限决策回写（27 个 hook events）
 - `mcp/runtime.py`：MCP server 状态折叠与快照生成、tools/list、tools/call、prompts 方法
 - `services/compact/`：上下文压缩（snip/reactive/auto_trigger/micro_compact）
+- `services/cost_tracker.py`：per-model pricing、session cost accumulation、cost report formatting
+- `services/agent_registry/built_in.py`：内置 agent 定义（general-purpose、Explore、Plan、verification、claude-code-guide、statusline-setup）
+- `query/stop_hooks.py`：post-model stop hook dispatch（Stop/SubagentStop event）
 - `services/session_memory/`：会话记忆提取与状态管理
 - `services/oauth/`：OAuth 2.0 授权码流程
 - `services/lsp/`：LSP server 管理与 diagnostics
@@ -74,7 +77,7 @@
 
 ## 测试与质量
 
-- 566 个测试覆盖 CLI、schema、permission、settings、tools、hooks、MCP、compact、session_memory、oauth、lsp、agent 等
+- 2030 个测试覆盖 CLI、schema、permission、settings、tools、hooks、MCP、compact、session_memory、oauth、lsp、agent 等
 - 类型标注完整、dataclass + Pydantic 分层清晰
 - 测试覆盖核心规则语义、后台任务生命周期、hook 输出处理
 - Agent Phase 4 新增 107 个测试（transcript/tracing/hooks/skill_preload/remote_backend）
@@ -128,6 +131,11 @@
 - `permissions/engine.py`
 - `query/backend.py`
 - `query/engine.py`
+- `query/stop_hooks.py`
+- `services/cost_tracker.py`
+- `services/agent_registry/built_in.py`
+- `services/agent_registry/types.py`
+- `services/compact/auto_compact_integration.py`
 - `services/compact/`
 - `services/session_memory/`
 - `services/oauth/`
@@ -158,6 +166,7 @@
 
 ## 变更记录 (Changelog)
 
+- 2026-06-21：新增 cost_tracker、stop_hooks、auto_compact_integration；agent_registry 新增 verification + claude-code-guide agent；engine 新增 rewind/stop_hook/budget/compact 方法；cli/runtime 新增 session cost/budget 字段；总计 2030 测试通过
 - 2026-04-15：深化 `/insights` 多阶段分析管道（Phase A-H），切换至 `session_storage/` 数据源；新增 `SessionMeta`、`SessionFacet`、`MultiClaudingStats`、`NarrativeSections`、`AggregatedInsightsData` 等 pipeline 类型；实现 `scan_session_logs`、`extract_session_meta`、`deduplicate_session_branches`、`aggregate_insights_data`、`detect_multi_clauding`、`format_insights_report` 等函数；`/insights` handler 已重新接线至 service；新增 `tests/test_services_insights.py`（21 个测试全部通过）
 - 2026-04-15：继续深化 `/install` 命令，接入 `services/native_installer/` 与 config service；现支持真实安装状态查看、stable/latest 安装流程、pinned version 偏好记录与 update channel 持久化，并新增命令测试。
 - 2026-04-15：补齐 `services/bridge/poll_config.py` 的动态配置接入，bridge poll config 现已通过 analytics dynamic config 读取 `tengu_bridge_poll_interval_config`；新增对应测试，关闭此前唯一保留的明确 runtime 缺口。
