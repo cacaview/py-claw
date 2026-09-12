@@ -381,7 +381,7 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                 self._screen()._register_overlay("permission-dialog")
                 self._screen().mount(dialog)
                 try:
-                    dialog.query_one("#btn-allow").focus()
+                    dialog.query_one("#btn-confirm").focus()
                 except Exception:
                     dialog.focus()
 

@@ -58,9 +58,6 @@ class PermissionDialog(Dialog):
         )
         self._on_allow = on_allow
         self._on_always_allow = on_always_allow
-        # Wire permission callbacks to the parent class's callback slots
-        # so the inherited @on handlers (which call _on_confirm/_on_deny) work correctly
-        self._on_confirm = on_allow
         self._on_deny = on_deny
 
     def _format_body(self) -> str:
@@ -90,15 +87,19 @@ class PermissionDialog(Dialog):
                 yield Static(self._body, id="dialog-body")
 
         with Horizontal(id="dialog-buttons"):
-            yield Button("Allow", id="btn-allow", variant="primary")
+            # The Allow button keeps the base-class id "btn-confirm" so the
+            # inherited @on(Button.Pressed, "#btn-confirm") wiring and any
+            # caller querying "#btn-confirm" keep working alongside the
+            # permission-specific Always-allow button.
+            yield Button("Allow", id="btn-confirm", variant="primary")
             yield Button("Always allow", id="btn-always-allow", variant="success")
             yield Button("Deny", id="btn-deny", variant="error")
 
     @property
     def default_focus_button_id(self) -> str:
-        return "#btn-allow"
+        return "#btn-confirm"
 
-    @on(Button.Pressed, "#btn-allow")
+    @on(Button.Pressed, "#btn-confirm")
     def _allow_pressed(self) -> None:
         self.confirm()
 
@@ -106,9 +107,9 @@ class PermissionDialog(Dialog):
     def _always_allow_pressed(self) -> None:
         self.always_allow()
 
-    @on(Button.Pressed, "#btn-deny")
-    def _deny_pressed(self) -> None:
-        self.deny()
+    # NOTE: no @on handler for "#btn-deny" here — the base class's decorated
+    # deny() already matches that selector; adding a second handler would fire
+    # the on_deny callback twice.
 
     def confirm(self) -> None:
         """Handle allow."""
@@ -154,6 +155,3 @@ class PermissionDialog(Dialog):
             self._on_deny = on_deny
         if on_cancel is not None:
             self._on_cancel = on_cancel
-        # Keep base-class callback slots in sync so inherited @on handlers work.
-        self._on_confirm = on_confirm if on_confirm is not None else self._on_confirm
-        self._on_deny = on_deny if on_deny is not None else self._on_deny

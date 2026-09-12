@@ -368,6 +368,47 @@ class TestStandaloneDialogs:
 
         assert declined == [True]
 
+    async def test_permission_dialog_renders_params_and_allow_deny(self) -> None:
+        """PermissionDialog renders request details and fires allow/deny callbacks."""
+        allowed: list[bool] = []
+        denied: list[bool] = []
+
+        async with App().run_test() as pilot:
+            dialog = PermissionDialog(
+                tool_name="Bash",
+                message="Run shell command",
+                params={"command": "pytest tests/test_tui/test_overlays.py", "timeout": 120000},
+                on_allow=lambda: allowed.append(True),
+                on_deny=lambda: denied.append(True),
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            body = str(pilot.app.query_one("#dialog-body").render())
+            assert "Run shell command" in body
+            assert "command: pytest tests/test_tui/test_overlays.py" in body
+            assert "timeout: 120000" in body
+
+            dialog.confirm()
+            await pilot.pause()
+
+        async with App().run_test() as pilot:
+            dialog = PermissionDialog(
+                tool_name="Bash",
+                message="Run shell command",
+                params={"command": "pytest tests/test_tui/test_overlays.py", "timeout": 120000},
+                on_allow=lambda: allowed.append(True),
+                on_deny=lambda: denied.append(True),
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            dialog.deny()
+            await pilot.pause()
+
+        assert allowed == [True]
+        assert denied == [True]
+
     async def test_permission_dialog_confirm_button(self) -> None:
         """PermissionDialog Allow button click triggers on_allow callback."""
         allowed: list[bool] = []
