@@ -5,6 +5,7 @@ Re-implements ClaudeCode-main/src/components/design-system/MessageList.tsx
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -19,6 +20,8 @@ from textual.widgets import Static
 
 from py_claw.ui.theme import get_theme
 from py_claw.ui.widgets.themed_text import ThemedText
+
+logger = logging.getLogger(__name__)
 
 
 class MessageRole(Enum):
@@ -51,6 +54,28 @@ class MessageList(ScrollableContainer):
     - Auto-scroll to bottom on new messages
     """
 
+    DEFAULT_CSS = """
+    MessageList {
+        /* The content box must grow with its messages. A plain Vertical
+           defaults to height: 1fr, which locks the content box to the
+           viewport: the scrollable container then reports a virtual size no
+           larger than itself and can never scroll. */
+        #message-list-content {
+            height: auto;
+        }
+
+        /* Each message is a plain Vertical, which also defaults to
+           height: 1fr. Inside a fixed-height box the 1fr children split the
+           viewport equally and their `overflow: hidden` clips long message
+           text (only the first N lines show, N shrinking with pane height).
+           height: auto lets every message size itself to its full text so the
+           MessageList can scroll through it. */
+        .message-item {
+            height: auto;
+        }
+    }
+    """
+
     class MessageClicked(Message):
         """Message sent when a message is clicked."""
 
@@ -70,6 +95,10 @@ class MessageList(ScrollableContainer):
         self._messages = messages or []
         self._on_message_click = on_message_click
         self._show_timestamps = show_timestamps
+        # Direct references to each message's content widget, keyed by message
+        # index. Avoids query_one/children-index lookups on update, which can
+        # fail while a freshly mounted message is not yet in the DOM.
+        self._content_widgets: dict[int, ThemedText] = {}
         super().__init__(id=id, classes=classes)
 
     def compose(self) -> ComposeResult:
@@ -113,9 +142,12 @@ class MessageList(ScrollableContainer):
             header_parts.append(f" [{theme.colors.get(status_color, '#888888')}]{msg.status}[/]")
 
         # Build message container
+        header_text = ThemedText(" ".join(header_parts), variant="normal")
+        content_text = ThemedText(msg.content, variant="normal", classes="message-content")
+        self._content_widgets[index] = content_text
         msg_container = Vertical(
-            ThemedText(" ".join(header_parts), variant="normal"),
-            ThemedText(msg.content, variant="normal"),
+            header_text,
+            content_text,
             id=f"message-{index}",
             classes="message-item",
         )
@@ -129,9 +161,52 @@ class MessageList(ScrollableContainer):
         container.mount(self._make_message_widget(msg, len(self._messages) - 1))
         self.scroll_end(animate=False)
 
+    def watch_virtual_size(self, old_size, new_size) -> None:
+        """Keep the log pinned to the bottom while content grows.
+
+        scroll_end() called right after content is added/updated computes
+        max_scroll_y from a *stale* virtual_size — layout has not run yet, so
+        the log can stay parked at the top, showing only the first lines of a
+        freshly added long message (the "long reply looks truncated" bug).
+        Deferring from this watcher runs the scroll after the layout that
+        changed virtual_size, so max_scroll_y is final and the scroll lands
+        at the true bottom.
+        """
+        self.scroll_end(animate=False)
+
+    def _update_content_widget(self, index: int, content: str) -> None:
+        """Push new content into a message's content widget.
+
+        Uses the direct widget reference recorded at mount time, falling back
+        to a DOM query if the widget was not tracked (e.g. initial compose).
+        Failures are logged instead of silently swallowed so streaming bugs
+        are visible.
+        """
+        content_widget = self._content_widgets.get(index)
+        if content_widget is None:
+            try:
+                container = self.query_one(f"#message-{index}", Vertical)
+                content_widget = container.children[1]
+            except Exception:
+                logger.warning(
+                    "MessageList: content widget for message %s not available for update",
+                    index,
+                    exc_info=True,
+                )
+                return
+        try:
+            content_widget.update(content)
+            self.scroll_end(animate=False)
+        except Exception:
+            logger.warning(
+                "MessageList: failed to update content of message %s",
+                index,
+                exc_info=True,
+            )
+
     def update_last_message(self, new_content: str, append: bool = False) -> None:
         """Update or append to the content of the last message in the list.
-        
+
         Args:
             new_content: The text to set or append.
             append: If True, append to existing content, otherwise replace it.
@@ -141,45 +216,31 @@ class MessageList(ScrollableContainer):
 
         idx = len(self._messages) - 1
         msg = self._messages[idx]
-        
+
         if append:
             msg.content += new_content
         else:
             msg.content = new_content
 
-        # Find the message container and its content text widget
-        # Index 1 is the content ThemedText (index 0 is the header)
-        try:
-            container = self.query_one(f"#message-{idx}", Vertical)
-            content_widget = container.children[1]
-            if hasattr(content_widget, 'update'):
-                content_widget.update(msg.content)
-            self.scroll_end(animate=False)
-        except Exception:
-            pass
+        self._update_content_widget(idx, msg.content)
 
     def update_item(self, item: MessageItem, new_content: str, append: bool = False) -> None:
         """Update the content of a specific message (by identity, not position)."""
-        try:
-            idx = self._messages.index(item)
-        except ValueError:
+        # Identity lookup: MessageItem is an eq=True dataclass, so list.index()
+        # would happily match a *different* message with equal field values.
+        idx = next((i for i, m in enumerate(self._messages) if m is item), None)
+        if idx is None:
             return
         if append:
             item.content += new_content
         else:
             item.content = new_content
-        try:
-            container = self.query_one(f"#message-{idx}", Vertical)
-            content_widget = container.children[1]
-            if hasattr(content_widget, "update"):
-                content_widget.update(item.content)
-            self.scroll_end(animate=False)
-        except Exception:
-            pass
+        self._update_content_widget(idx, item.content)
 
     def clear_messages(self) -> None:
         """Clear all messages."""
         self._messages.clear()
+        self._content_widgets.clear()
         container = self.query_one("#message-list-content", Vertical)
         container.remove_children()
 

@@ -141,9 +141,20 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         Screen {
             layout: vertical;
         }
+        /* No max-height cap here: capping the log (e.g. max-height: 60%)
+           leaves the leftover space as a blank band *below* the footer, and
+           shrinks the visible message area. As the last 1fr child it should
+           absorb all remaining vertical space so the prompt+footer sit at
+           the bottom edge. */
         #repl-message-log {
             height: 1fr;
-            max-height: 60%;
+        }
+        /* Belt-and-suspenders: the canonical rules live in
+           MessageList.DEFAULT_CSS (widgets/messages.py) — a plain Vertical
+           defaults to height: 1fr, which squeezes overflowing content instead
+           of letting #repl-message-log scroll. */
+        #message-list-content {
+            height: auto;
         }
         #repl-prompt-input {
             height: auto;
@@ -152,7 +163,6 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         /* Narrow terminal adaptations (applied via add_class) */
         Screen.narrow #repl-message-log {
             height: 1fr;
-            max-height: 65%;
         }
         Screen.narrow #repl-prompt-input {
             margin: 0;
@@ -162,9 +172,6 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         }
 
         /* Short terminal adaptations (height < 20 rows) */
-        Screen.short #repl-message-log {
-            max-height: 55%;
-        }
         Screen.short #repl-prompt-input {
             margin: 0;
         }

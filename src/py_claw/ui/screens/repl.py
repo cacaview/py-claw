@@ -14,6 +14,7 @@ Features:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING, Any, Callable
 from datetime import datetime
@@ -34,6 +35,8 @@ from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode
 from py_claw.ui.widgets.prompt_footer import PromptFooter
 from py_claw.ui.widgets.status_line import StatusLine
 from py_claw.ui.widgets.messages import MessageList, MessageItem, MessageRole
+
+logger = logging.getLogger(__name__)
 
 
 def _default_model_label() -> str:
@@ -460,7 +463,7 @@ class REPLScreen(Vertical):
             log = self.query_one("#repl-message-log", MessageList)
             log.update_last_message(content, append)
         except Exception:
-            pass
+            logger.warning("REPLScreen: update_last_message failed", exc_info=True)
 
     def append_tool_progress(self, tool_name: str, elapsed: float, detail: str = "") -> None:
         """Append tool progress message, optionally with a run/summary detail."""
@@ -486,7 +489,7 @@ class REPLScreen(Vertical):
             log = self.query_one("#repl-message-log", MessageList)
             log.update_item(item, content, append)
         except Exception:
-            pass
+            logger.warning("REPLScreen: update_message_item failed", exc_info=True)
 
     def append_error(self, error: str) -> None:
         """Append error message."""
