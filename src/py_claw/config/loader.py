@@ -26,6 +26,9 @@ class ApiConfig:
     api_key: str = ""
     api_url: str = ""
     model: str = ""
+    # Wire protocol spoken at api_url: "openai" (chat completions) or
+    # "anthropic" (Messages API). Selects the query backend.
+    protocol: str = "openai"
 
     def is_configured(self) -> bool:
         return bool(self.api_key) and bool(self.api_url)
@@ -97,6 +100,7 @@ def load_config(config_path: Path | None = None) -> Config:
         api_key=api_data.get("api_key", ""),
         api_url=api_data.get("api_url", ""),
         model=api_data.get("model", ""),
+        protocol=api_data.get("protocol", "openai"),
     )
 
     return Config(api=api, extra=extra)
@@ -119,6 +123,8 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         raw["api"]["api_url"] = config.api.api_url
     if config.api.model:
         raw["api"]["model"] = config.api.model
+    if config.api.protocol and config.api.protocol != "openai":
+        raw["api"]["protocol"] = config.api.protocol
     raw.update(config.extra)
 
     path.write_text(json.dumps(raw, indent=4, ensure_ascii=False), encoding="utf-8")

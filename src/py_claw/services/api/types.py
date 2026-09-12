@@ -33,12 +33,16 @@ class MessageParam(BaseModel):
 class ContentBlockParam(BaseModel):
     """A content block for API requests."""
 
-    type: Literal["text", "image", "tool_use"]
+    type: Literal["text", "image", "tool_use", "tool_result"]
     text: str | None = None
     source: "MediaSource | None" = None
     id: str | None = None
     name: str | None = None
     input: dict[str, Any] | None = None
+    # tool_result blocks (results returned to the model after execution)
+    tool_use_id: str | None = None
+    content: "str | list[ContentBlockParam] | None" = None
+    is_error: bool | None = None
 
 
 class MediaSource(BaseModel):

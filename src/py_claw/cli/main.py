@@ -70,17 +70,28 @@ def _build_state(args: argparse.Namespace) -> RuntimeState:
             if state.tool_runtime and state.tool_runtime.registry:
                 for tool in state.tool_runtime.registry.values():
                     tool_defs.append((tool.definition.name, tool.definition.input_model))
+            tool_defs = [d for d in tool_defs if d is not None]
 
-            # Convert to OpenAI tools format
-            from py_claw.query.backend import tool_definitions_to_openai_tools
-            tools = tool_definitions_to_openai_tools([d for d in tool_defs if d is not None]) if tool_defs else None
+            if cfg.api.protocol == "anthropic":
+                from py_claw.query.backend import AnthropicQueryBackend, tool_definitions_to_anthropic_tools
 
-            state.query_backend = ApiQueryBackend(
-                api_key=cfg.api.api_key,
-                api_url=cfg.api.api_url,
-                model=cfg.api.model,
-                tools=tools,
-            )
+                state.query_backend = AnthropicQueryBackend(
+                    api_key=cfg.api.api_key,
+                    model=cfg.api.model,
+                    tools=tool_definitions_to_anthropic_tools(tool_defs) if tool_defs else None,
+                    base_url=cfg.api.api_url or None,
+                )
+            else:
+                # Convert to OpenAI tools format
+                from py_claw.query.backend import tool_definitions_to_openai_tools
+                tools = tool_definitions_to_openai_tools(tool_defs) if tool_defs else None
+
+                state.query_backend = ApiQueryBackend(
+                    api_key=cfg.api.api_key,
+                    api_url=cfg.api.api_url,
+                    model=cfg.api.model,
+                    tools=tools,
+                )
     return state
 
 

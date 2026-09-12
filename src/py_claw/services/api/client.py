@@ -193,7 +193,16 @@ class AnthropicClient:
             type="message",
             role="assistant",
             content=[
-                ContentBlock(type=c.type, text=getattr(c, "text", None))
+                ContentBlock(
+                    type=c.type,
+                    text=getattr(c, "text", None),
+                    # Preserve tool_use payloads (id/name/input) and thinking
+                    # text - dropping them made tool calling impossible.
+                    id=getattr(c, "id", None),
+                    name=getattr(c, "name", None),
+                    input=dict(getattr(c, "input", None) or {}) or None,
+                    thinking=getattr(c, "thinking", None),
+                )
                 for c in response.content
             ],
             model=response.model,
@@ -407,7 +416,16 @@ class AsyncAnthropicClient:
             type="message",
             role="assistant",
             content=[
-                ContentBlock(type=c.type, text=getattr(c, "text", None))
+                ContentBlock(
+                    type=c.type,
+                    text=getattr(c, "text", None),
+                    # Preserve tool_use payloads (id/name/input) and thinking
+                    # text - dropping them made tool calling impossible.
+                    id=getattr(c, "id", None),
+                    name=getattr(c, "name", None),
+                    input=dict(getattr(c, "input", None) or {}) or None,
+                    thinking=getattr(c, "thinking", None),
+                )
                 for c in response.content
             ],
             model=response.model,

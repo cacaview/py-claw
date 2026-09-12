@@ -748,10 +748,14 @@ class AnthropicQueryBackend:
         api_key: str,
         model: str | None = None,
         max_output_tokens: int = 8192,
+        tools: list["ToolParam"] | None = None,
+        base_url: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._max_output_tokens = max_output_tokens
+        self._tools = list(tools or [])
+        self._base_url = base_url
         self._client: "AnthropicClient | None" = None
 
     @property
@@ -760,6 +764,11 @@ class AnthropicQueryBackend:
         if self._client is None:
             from py_claw.services.api.client import AnthropicClient, _build_provider_config
             config = _build_provider_config(self._api_key)
+            if self._base_url:
+                # Anthropic SDK appends /v1/messages to the base URL itself.
+                config.base_url = self._base_url.rstrip("/")
+                if config.base_url.endswith("/v1"):
+                    config.base_url = config.base_url[: -len("/v1")]
             self._client = AnthropicClient(config=config)
         return self._client
 
@@ -792,6 +801,7 @@ class AnthropicQueryBackend:
             model=model,
             messages=messages,
             system=system,
+            tools=self._tools or None,
             max_tokens=prepared.max_thinking_tokens or self._max_output_tokens,
         )
 
@@ -811,12 +821,20 @@ class AnthropicQueryBackend:
         # Extract tool calls
         tool_calls = _extract_tool_calls_from_content(result.content)
 
-        # Build usage
+        # Build usage from the server-reported token counts; fall back to
+        # text-length estimates only when the response lacks usage.
         usage_dict = _build_usage(
             prepared=prepared,
             assistant_text=assistant_text,
             backend_type="anthropic",
         )
+        if result.usage is not None:
+            usage_dict["inputTokens"] = result.usage.input_tokens
+            usage_dict["outputTokens"] = result.usage.output_tokens
+            if result.usage.cache_read_input_tokens is not None:
+                usage_dict["cacheReadInputTokens"] = result.usage.cache_read_input_tokens
+            if result.usage.cache_creation_input_tokens is not None:
+                usage_dict["cacheCreationInputTokens"] = result.usage.cache_creation_input_tokens
         model_usage_dict = _build_model_usage(
             prepared=prepared,
             assistant_text=assistant_text,
@@ -835,6 +853,29 @@ class AnthropicQueryBackend:
         )
 
 
+def _normalize_anthropic_content(content: Any) -> Any:
+    """Render transcript content blocks into API-valid Anthropic shapes.
+
+    tool_result blocks carry the structured tool output dict; the Messages
+    API only accepts a string or a list of text blocks there, so render it
+    with the same model-friendly formatting the OpenAI path uses.
+    """
+    if not isinstance(content, list):
+        return content
+    normalized: list[dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            rendered = block.get("content")
+            if not isinstance(rendered, str):
+                rendered = _format_tool_result_content(rendered)
+            fixed = dict(block)
+            fixed["content"] = rendered
+            normalized.append(fixed)
+        else:
+            normalized.append(block)
+    return normalized
+
+
 def _transcript_to_messages(transcript: list[object]) -> list[dict[str, Any]]:
     """Convert transcript objects to plain dict messages for JSON serialization."""
     messages: list[dict[str, Any]] = []
@@ -842,6 +883,7 @@ def _transcript_to_messages(transcript: list[object]) -> list[dict[str, Any]]:
         role = getattr(item, "type", None)
         if role == "user" or getattr(item, "role", None) == "user":
             content = _extract_message_content(item)
+            content = _normalize_anthropic_content(content)
             if content:
                 messages.append({"role": "user", "content": content})
         elif role == "assistant" or getattr(item, "role", None) == "assistant":
@@ -993,14 +1035,16 @@ def _extract_assistant_content(item: object) -> str | list[dict[str, Any]]:
 
 
 def _extract_text_from_content(content: list[Any]) -> str:
-    """Extract text from API response content blocks."""
+    """Extract the user-facing text from API response content blocks.
+
+    Thinking blocks are dropped: the final answer is what the transcript and
+    the UI should carry (upstream Claude Code does not replay thinking as
+    assistant text either).
+    """
     parts: list[str] = []
     for block in content:
-        if hasattr(block, "text") and block.text:
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None):
             parts.append(block.text)
-        elif hasattr(block, "thinking") and block.thinking:
-            # Include thinking in brackets
-            parts.append(f"[Thinking: {block.thinking}]")
     return "".join(parts)
 
 
@@ -1040,6 +1084,21 @@ def _pydantic_to_openai_schema(input_model: type) -> dict[str, Any]:
         parameters["required"] = required
 
     return parameters
+
+
+def tool_definitions_to_anthropic_tools(
+    tool_definitions: list[tuple[str, type]],
+) -> list[ToolParam]:
+    """Convert (name, Pydantic model) pairs into Anthropic ToolParam format."""
+    from py_claw.services.api.types import ToolParam
+
+    tools: list[ToolParam] = []
+    for name, input_model in tool_definitions:
+        schema = _pydantic_to_openai_schema(input_model)
+        doc = (getattr(input_model, "__doc__", "") or "").strip()
+        description = doc.split("\n")[0] if doc else None
+        tools.append(ToolParam(name=name, description=description, input_schema=schema))
+    return tools
 
 
 def tool_definitions_to_openai_tools(
