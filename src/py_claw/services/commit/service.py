@@ -113,6 +113,8 @@ def _run_git_command(args: list[str], cwd: str | None = None) -> tuple[int, str,
             cwd=cwd or None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         return result.returncode, result.stdout, result.stderr

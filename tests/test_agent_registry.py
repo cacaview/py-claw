@@ -55,7 +55,7 @@ class TestBuiltInAgents:
         assert "Explore" in BUILTIN_AGENTS
         assert "Plan" in BUILTIN_AGENTS
         assert "statusline-setup" in BUILTIN_AGENTS
-        assert len(BUILTIN_AGENTS) == 4
+        assert len(BUILTIN_AGENTS) == 6
 
 
 class TestGetBuiltinAgent:
@@ -72,7 +72,7 @@ class TestGetBuiltinAgent:
 
     def test_get_all_agents(self) -> None:
         agents = get_builtin_agents()
-        assert len(agents) == 4
+        assert len(agents) == 6
         assert "general-purpose" in agents
         assert "Explore" in agents
         assert "Plan" in agents
@@ -100,7 +100,7 @@ class TestAgentRegistryService:
         svc = get_agent_registry_service()
         svc.initialize()
         agents = svc.list_builtin_agents()
-        assert len(agents) == 4
+        assert len(agents) == 6
         agent_types = {a["agent_type"] for a in agents}
         assert "general-purpose" in agent_types
         assert "Explore" in agent_types

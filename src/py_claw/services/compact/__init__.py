@@ -33,6 +33,8 @@ from .auto_trigger import (
     record_compact_success,
     record_compact_failure,
     is_circuit_breaker_tripped,
+    _context_window_for_model,
+    MODEL_CONTEXT_WINDOWS,
     MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
 )
 from .micro_compact import (
@@ -81,6 +83,8 @@ __all__ = [
     "truncate_head_for_ptl_retry",
     "build_post_compact_messages",
     # Auto trigger
+    "_context_window_for_model",
+    "MODEL_CONTEXT_WINDOWS",
     "auto_compact_if_needed",
     "compute_effective_threshold",
     "should_auto_compact",

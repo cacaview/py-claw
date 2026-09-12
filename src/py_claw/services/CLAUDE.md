@@ -19,6 +19,8 @@
 - Doctor 诊断（`doctor/`）— 系统诊断、安装检查、上下文警告
 - Commit 服务（`commit/`）— Git commit 分析、attribution 跟踪、commit prompt 生成
 - Diff 服务（`diff/`）— 结构化 diff 生成、LCS 算法、hunk 格式
+- Cost tracking 与 budget 管理（`cost_tracker.py`）
+- Built-in agent registry（`agent_registry/`）— 内置 agent 定义、注册与查询
 
 ## 子模块导航
 
@@ -35,7 +37,7 @@
 - `chrome/` — Chrome 扩展检测、浏览器检测、URL 打开
 - `install_github_app/` — GitHub Actions 集成（使用 gh CLI 与 GitHub API 创建 workflow 和 PR）
 - `context/CLAUDE.md` — Git 状态、CLAUDE.md 加载、系统/用户上下文
-- `compact/CLAUDE.md` — 上下文压缩、snip/reactive/micro_compact
+- `compact/CLAUDE.md` — 上下文压缩、snip/reactive/micro_compact/auto_compact_integration
 - `session_memory/CLAUDE.md` — 会话记忆提取、状态管理
 - `session_storage/` — 会话文件 I/O、路径管理、搜索
 - `oauth/CLAUDE.md` — OAuth 授权码流程、PKCE、token refresh
@@ -62,9 +64,12 @@
 - `file_persistence/` — BYOC 模式文件持久化（U18）
 - `native_installer/` — 原生安装器、版本管理（U19）
 - `powershell/` — PowerShell AST 解析、危险 cmdlet（U20）
+- `cost_tracker.py` — Per-model pricing、session cost accumulation、cost report formatting
+- `agent_registry/` — Built-in agent definitions（general-purpose、Explore、Plan、verification、claude-code-guide、statusline-setup）
 
 ## 变更记录 (Changelog)
 
+- 2026-06-21：新增 `cost_tracker.py`（per-model pricing + session cost）和 `agent_registry/`（内置 agent 注册：verification、claude-code-guide）
 - 2026-04-18：新增 `speculation/` 模块，实现推测执行引擎（SpeculationService、OverlayManager、tengu_speculation analytics）；ForkedAgentProcess 增加 `start_speculation()` fire-and-forget 方法；Fork 协议增加 `turn_count`/`boundary`/`output_tokens` 字段和 `ForkSpeculationStartMessage`；`tui_state.py` / `prompt_footer.py` / `repl.py` 增加 speculation 状态展示与同步
 - 2026-04-15：新增 `worktree/` 模块，实现 Agent worktree 管理（createAgentWorktree/removeAgentWorktree/cleanupStaleAgentWorktrees），包含 ephemeral slug 模式匹配和 stale worktree 清理功能
 - 2026-04-14：新增 `install_github_app/` 模块，实现 GitHub Actions 集成（使用 gh CLI 与 GitHub API 创建 workflow 和 PR）

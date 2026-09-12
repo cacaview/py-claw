@@ -58,6 +58,9 @@ class PermissionDialog(Dialog):
         )
         self._on_allow = on_allow
         self._on_always_allow = on_always_allow
+        # Wire permission callbacks to the parent class's callback slots
+        # so the inherited @on handlers (which call _on_confirm/_on_deny) work correctly
+        self._on_confirm = on_allow
         self._on_deny = on_deny
 
     def _format_body(self) -> str:
@@ -149,3 +152,8 @@ class PermissionDialog(Dialog):
             self._on_allow = on_confirm
         if on_deny is not None:
             self._on_deny = on_deny
+        if on_cancel is not None:
+            self._on_cancel = on_cancel
+        # Keep base-class callback slots in sync so inherited @on handlers work.
+        self._on_confirm = on_confirm if on_confirm is not None else self._on_confirm
+        self._on_deny = on_deny if on_deny is not None else self._on_deny

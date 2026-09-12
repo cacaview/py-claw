@@ -72,6 +72,17 @@ class RuntimeState:
     permission_ask_callback: Callable[[str, str, dict[str, Any], str | None], tuple[str, dict[str, Any] | None, str | None]] | None = None
     ask_user_callback: Callable[[Any], tuple[str, dict[str, Any] | None]] | None = None
 
+    # Session cost/token tracking
+    session_cost_usd: float = 0.0
+    session_input_tokens: int = 0
+    session_output_tokens: int = 0
+    session_cache_read_tokens: int = 0
+    session_cache_creation_tokens: int = 0
+    session_api_duration_ms: float = 0.0
+    session_turn_count: int = 0
+    cost_budget_usd: float | None = None
+    token_budget: int | None = None
+
     def __post_init__(self) -> None:
         if self.tool_runtime is None:
             self.tool_runtime = ToolRuntime(task_runtime=self.task_runtime)

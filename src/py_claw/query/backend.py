@@ -970,22 +970,41 @@ class AnthropicQueryBackend:
 
         # Build usage from the server-reported token counts; fall back to
         # text-length estimates only when the response lacks usage.
+        usage_data = {}
+        if result.usage is not None:
+            usage_data = {
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "cache_read_input_tokens": result.usage.cache_read_input_tokens or 0,
+                "cache_creation_input_tokens": result.usage.cache_creation_input_tokens or 0,
+            }
+
+        # Calculate actual cost from token counts
+        from py_claw.services.cost_tracker import calculate_cost
+        total_cost_usd = calculate_cost(
+            model or self._model or "",
+            usage_data.get("input_tokens", 0),
+            usage_data.get("output_tokens", 0),
+            usage_data.get("cache_read_input_tokens", 0),
+            usage_data.get("cache_creation_input_tokens", 0),
+        )
+
         usage_dict = _build_usage(
             prepared=prepared,
             assistant_text=assistant_text,
             backend_type="anthropic",
         )
-        if result.usage is not None:
-            usage_dict["inputTokens"] = result.usage.input_tokens
-            usage_dict["outputTokens"] = result.usage.output_tokens
-            if result.usage.cache_read_input_tokens is not None:
-                usage_dict["cacheReadInputTokens"] = result.usage.cache_read_input_tokens
-            if result.usage.cache_creation_input_tokens is not None:
-                usage_dict["cacheCreationInputTokens"] = result.usage.cache_creation_input_tokens
+        if usage_data:
+            usage_dict["inputTokens"] = usage_data["input_tokens"]
+            usage_dict["outputTokens"] = usage_data["output_tokens"]
+            if usage_data["cache_read_input_tokens"]:
+                usage_dict["cacheReadInputTokens"] = usage_data["cache_read_input_tokens"]
+            if usage_data["cache_creation_input_tokens"]:
+                usage_dict["cacheCreationInputTokens"] = usage_data["cache_creation_input_tokens"]
         model_usage_dict = _build_model_usage(
             prepared=prepared,
             assistant_text=assistant_text,
-            total_cost_usd=0.0,  # SDK doesn't provide cost in response
+            total_cost_usd=total_cost_usd,
         )
 
         return BackendTurnResult(
@@ -994,7 +1013,7 @@ class AnthropicQueryBackend:
             usage=usage_dict,
             model_usage=model_usage_dict,
             duration_api_ms=elapsed_ms,
-            total_cost_usd=0.0,
+            total_cost_usd=total_cost_usd,
             tool_calls=tool_calls,
             prompt_suggestion=None,
         )

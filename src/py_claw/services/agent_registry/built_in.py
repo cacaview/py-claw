@@ -269,6 +269,99 @@ STATUSLINE_SETUP_AGENT = BuiltInAgentDefinition(
 
 
 # ============================================================================
+# Verification Agent (Read-only code change verification)
+# ============================================================================
+
+VERIFICATION_AGENT_SYSTEM_PROMPT = """You are a verification agent for Claude Code. Your job is to verify that code changes work correctly by running tests, checking compilation, and validating behavior.
+
+=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
+You MUST NOT modify any files. Your role is to:
+1. Run existing tests to verify changes work
+2. Check that code compiles/builds successfully
+3. Verify that the expected behavior is present
+4. Report any issues found
+
+You CAN:
+- Run test commands (pytest, npm test, cargo test, etc.)
+- Run build commands (npm build, cargo build, etc.)
+- Read files to understand what changed
+- Run read-only git commands (git status, git diff, git log)
+
+You CANNOT:
+- Edit, create, or delete files
+- Install packages
+- Make git commits
+- Modify configuration
+
+Report your findings clearly: what passed, what failed, and any concerns."""
+
+VERIFICATION_AGENT = BuiltInAgentDefinition(
+    agent_type="verification",
+    description="Verification agent that validates code changes by running tests and checks.",
+    prompt=VERIFICATION_AGENT_SYSTEM_PROMPT,
+    when_to_use=(
+        "Verification agent for validating code changes. Use this after making changes "
+        "to verify they work correctly. The agent runs tests, checks compilation, and "
+        "validates expected behavior without modifying any files."
+    ),
+    tools=["Glob", "Grep", "Read", "Bash"],
+    disallowed_tools=[
+        "Write",
+        "Edit",
+        "NotebookEdit",
+        "Agent",
+        "EnterPlanMode",
+    ],
+    model="inherit",
+    omit_claude_md=False,
+    background=True,
+)
+
+
+# ============================================================================
+# Claude Code Guide Agent (Usage help and documentation)
+# ============================================================================
+
+CLAUDE_CODE_GUIDE_AGENT_SYSTEM_PROMPT = """You are a helpful guide for Claude Code, Anthropic's official CLI tool. You answer questions about how to use Claude Code, its features, configuration, and capabilities.
+
+Your knowledge covers:
+- Claude Code CLI features and commands
+- Keyboard shortcuts and keybindings
+- MCP server configuration
+- Settings and configuration files (.claude/settings.json)
+- Claude Agent SDK usage
+- Claude API usage and tool use
+- IDE integrations (VS Code, JetBrains)
+- Hooks system
+- Plugin system
+- Skills system
+- Permission modes
+
+When answering:
+- Be concise and practical
+- Provide specific command examples when relevant
+- Reference configuration file paths
+- Link to relevant documentation sections if known
+- If unsure about something, say so rather than guessing
+
+You have read-only access to search the web for the latest Claude Code documentation."""
+
+CLAUDE_CODE_GUIDE_AGENT = BuiltInAgentDefinition(
+    agent_type="claude-code-guide",
+    description="Guide for Claude Code features, commands, and configuration.",
+    prompt=CLAUDE_CODE_GUIDE_AGENT_SYSTEM_PROMPT,
+    when_to_use=(
+        "Use this agent when the user asks questions about Claude Code features, "
+        "commands, configuration, keyboard shortcuts, MCP servers, settings, IDE "
+        "integrations, or how to use Claude Code effectively."
+    ),
+    tools=["Glob", "Grep", "Read", "WebFetch", "WebSearch"],
+    model="haiku",
+    permission_mode="dontAsk",
+)
+
+
+# ============================================================================
 # Registry
 # ============================================================================
 
@@ -276,6 +369,8 @@ BUILTIN_AGENTS = {
     "general-purpose": GENERAL_PURPOSE_AGENT,
     "Explore": EXPLORE_AGENT,
     "Plan": PLAN_AGENT,
+    "verification": VERIFICATION_AGENT,
+    "claude-code-guide": CLAUDE_CODE_GUIDE_AGENT,
     "statusline-setup": STATUSLINE_SETUP_AGENT,
 }
 

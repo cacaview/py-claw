@@ -86,4 +86,5 @@ from py_claw.services.commit import (
 
 ## 变更记录 (Changelog)
 
+- 2026-06-21：`service.py` 修复 `_run_git_command()` encoding，添加 `encoding="utf-8", errors="replace"` 避免 Windows GBK 解码错误
 - 2026-04-13：新增 `commit/` 模块，实现 M10 功能（Git commit 分析和 preparation）

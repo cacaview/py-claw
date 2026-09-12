@@ -597,7 +597,9 @@ class REPLScreen(Vertical):
             pass
 
     def clear_log(self) -> None:
-        """Clear the message log."""
+        """Clear the message log. Disabled when an overlay is active."""
+        if self._is_overlay_active:
+            return
         log = self.query_one("#repl-message-log", MessageList)
         log.clear_messages()
 

@@ -468,6 +468,7 @@ class QueryRuntime:
         self._active_turn_state: QueryTurnState | None = None
         self._active_message_uuid: str | None = None
         self._persisted_transcript_count = 0
+        self._file_mutations: list[dict[str, Any]] = []  # Track file changes per turn
 
     @property
     def turn_executor(self) -> TurnExecutor:
@@ -480,6 +481,55 @@ class QueryRuntime:
     @property
     def transcript(self) -> list[object]:
         return list(self._transcript)
+
+    def rewind_messages(self, count: int) -> tuple[bool, str]:
+        """Remove the last N messages from the transcript.
+
+        Returns (success, message) tuple.
+        """
+        if count <= 0:
+            return False, "Count must be a positive integer"
+        if count >= len(self._transcript):
+            return False, f"Cannot rewind {count} messages: only {len(self._transcript)} messages in history"
+
+        # Save the messages being removed for potential undo
+        removed = self._transcript[-count:]
+        self._transcript = self._transcript[:-count]
+
+        # Update active turn state if present
+        if self._active_turn_state is not None:
+            self._active_turn_state.transcript = list(self._transcript)
+
+        # Save session state
+        if self._session_id is not None:
+            self.save_session_state(self._session_id)
+
+        return True, f"Rewound {count} messages ({len(self._transcript)} remaining)"
+
+    def message_count(self) -> int:
+        """Return the number of messages in the current transcript."""
+        return len(self._transcript)
+
+    def get_message_history(self) -> list[object]:
+        """Return a copy of the message history."""
+        return list(self._transcript)
+
+    def record_file_mutation(self, path: str, operation: str, *, old_content: str | None = None, new_content: str | None = None) -> None:
+        """Record a file mutation for potential rewind."""
+        self._file_mutations.append({
+            "path": path,
+            "operation": operation,
+            "old_content": old_content,
+            "new_content": new_content,
+            "turn_count": self._turn_count,
+            "session_id": self._session_id,
+        })
+
+    def get_file_mutations(self, since_turn: int | None = None) -> list[dict[str, Any]]:
+        """Get file mutations, optionally filtered by turn number."""
+        if since_turn is None:
+            return list(self._file_mutations)
+        return [m for m in self._file_mutations if m["turn_count"] >= since_turn]
 
     def execute_turn(self, prepared: PreparedTurn) -> ExecutedTurn:
         self.state.interrupt_event.clear()
@@ -724,7 +774,33 @@ class QueryRuntime:
                             from py_claw.query.backend import _openai_usage_to_keys
                             executed.usage.update(_openai_usage_to_keys(stream_usage))
                         if not executed.tool_calls:
-                            yield self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), list(tool_outputs)
+                            executed = self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests)
+                            # Run stop hooks after model response
+                            stop_result = self._run_stop_hooks(executed, session_id=self._session_id or "")
+                            if stop_result.prevent_continuation:
+                                # Inject blocking errors as tool outputs and stop
+                                for error in stop_result.blocking_errors:
+                                    tool_outputs.append(self._error_result_message(self._session_id or "", RuntimeError(error), perf_counter()))
+                                yield executed, list(tool_outputs)
+                                return
+                            # If stop hooks provided additional context, inject it
+                            if stop_result.additional_context:
+                                executed = ExecutedTurn(
+                                    assistant_text=executed.assistant_text + "\n\n" + stop_result.additional_context,
+                                    stop_reason=executed.stop_reason,
+                                    usage=executed.usage,
+                                    model_usage=executed.model_usage,
+                                    duration_api_ms=executed.duration_api_ms,
+                                    total_cost_usd=executed.total_cost_usd,
+                                    tool_calls=executed.tool_calls,
+                                    prompt_suggestion=executed.prompt_suggestion,
+                                )
+                            # Check budget before yielding final result
+                            budget_result = self._check_budget_and_maybe_compact(executed, tool_outputs=tool_outputs)
+                            if budget_result is not None:
+                                yield budget_result, list(tool_outputs)
+                                return
+                            yield executed, list(tool_outputs)
                             return
                     else:
                         raise QueryTurnFailure(RuntimeError("Streaming executor returned no result"), tool_outputs)
@@ -734,7 +810,31 @@ class QueryRuntime:
                     if self.state.interrupt_event.is_set():
                         raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
                     if not executed.tool_calls:
-                        yield self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), list(tool_outputs)
+                        executed = self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests)
+                        # Run stop hooks after model response
+                        stop_result = self._run_stop_hooks(executed, session_id=self._session_id or "")
+                        if stop_result.prevent_continuation:
+                            for error in stop_result.blocking_errors:
+                                tool_outputs.append(self._error_result_message(self._session_id or "", RuntimeError(error), perf_counter()))
+                            yield executed, list(tool_outputs)
+                            return
+                        if stop_result.additional_context:
+                            executed = ExecutedTurn(
+                                assistant_text=executed.assistant_text + "\n\n" + stop_result.additional_context,
+                                stop_reason=executed.stop_reason,
+                                usage=executed.usage,
+                                model_usage=executed.model_usage,
+                                duration_api_ms=executed.duration_api_ms,
+                                total_cost_usd=executed.total_cost_usd,
+                                tool_calls=executed.tool_calls,
+                                prompt_suggestion=executed.prompt_suggestion,
+                            )
+                        # Check budget before yielding final result
+                        budget_result = self._check_budget_and_maybe_compact(executed, tool_outputs=tool_outputs)
+                        if budget_result is not None:
+                            yield budget_result, list(tool_outputs)
+                            return
+                        yield executed, list(tool_outputs)
                         return
 
                 self._guard_against_tool_loop(executed.tool_calls, previous_call_signature=previous_call_signature, streak=identical_call_streak, tool_outputs=tool_outputs)
@@ -750,6 +850,13 @@ class QueryRuntime:
                 except Exception as exc:
                     raise QueryTurnFailure(exc, tool_outputs) from exc
                 self._advance_turn_state_after_tool_calls(executed.tool_calls)
+                # Check budget after tool calls complete
+                budget_result = self._check_budget_and_maybe_compact(executed, tool_outputs=tool_outputs)
+                if budget_result is not None:
+                    yield budget_result, list(tool_outputs)
+                    return
+                # Check auto-compact between turns
+                self._check_auto_compact(tool_outputs=tool_outputs)
                 if self.state.interrupt_event.is_set():
                     raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
         finally:
@@ -784,7 +891,29 @@ class QueryRuntime:
                 if self.state.interrupt_event.is_set():
                     raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
                 if not executed.tool_calls:
-                    return self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), tool_outputs
+                    executed = self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests)
+                    # Run stop hooks after model response
+                    stop_result = self._run_stop_hooks(executed, session_id=self._session_id or "")
+                    if stop_result.prevent_continuation:
+                        for error in stop_result.blocking_errors:
+                            tool_outputs.append(self._error_result_message(self._session_id or "", RuntimeError(error), perf_counter()))
+                        return executed, tool_outputs
+                    if stop_result.additional_context:
+                        executed = ExecutedTurn(
+                            assistant_text=executed.assistant_text + "\n\n" + stop_result.additional_context,
+                            stop_reason=executed.stop_reason,
+                            usage=executed.usage,
+                            model_usage=executed.model_usage,
+                            duration_api_ms=executed.duration_api_ms,
+                            total_cost_usd=executed.total_cost_usd,
+                            tool_calls=executed.tool_calls,
+                            prompt_suggestion=executed.prompt_suggestion,
+                        )
+                    # Check budget before returning final result
+                    budget_result = self._check_budget_and_maybe_compact(executed, tool_outputs=tool_outputs)
+                    if budget_result is not None:
+                        return budget_result, tool_outputs
+                    return executed, tool_outputs
                 self._guard_against_tool_loop(executed.tool_calls, previous_call_signature=previous_call_signature, streak=identical_call_streak, tool_outputs=tool_outputs)
                 previous_call_signature, identical_call_streak = self._track_tool_call_streak(
                     executed.tool_calls, previous_call_signature, identical_call_streak
@@ -796,6 +925,12 @@ class QueryRuntime:
                 except Exception as exc:
                     raise QueryTurnFailure(exc, tool_outputs) from exc
                 self._advance_turn_state_after_tool_calls(executed.tool_calls)
+                # Check budget after tool calls complete
+                budget_result = self._check_budget_and_maybe_compact(executed, tool_outputs=tool_outputs)
+                if budget_result is not None:
+                    return budget_result, tool_outputs
+                # Check auto-compact between turns
+                self._check_auto_compact(tool_outputs=tool_outputs)
                 if self.state.interrupt_event.is_set():
                     raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
         finally:
@@ -882,6 +1017,17 @@ class QueryRuntime:
         )
 
     def _apply_tool_usage_metrics(self, executed: ExecutedTurn, *, web_search_requests: int) -> ExecutedTurn:
+        # Accumulate session cost regardless of web search
+        from py_claw.services.cost_tracker import accumulate_session_cost
+        accumulate_session_cost(
+            self.state,
+            executed.usage,
+            executed.model_usage,
+            executed.total_cost_usd,
+            executed.duration_api_ms,
+        )
+        self.state.session_turn_count += 1
+
         if web_search_requests <= 0:
             return executed
 
@@ -900,6 +1046,95 @@ class QueryRuntime:
         executed.usage = usage
         executed.model_usage = model_usage
         return executed
+
+    def _check_budget_and_maybe_compact(
+        self, executed: ExecutedTurn, *, tool_outputs: list[StdoutMessage]
+    ) -> ExecutedTurn | None:
+        """Check token/cost budget after each turn.
+
+        Returns ``None`` if the budget is fine (or auto-compact was attempted),
+        or an ``ExecutedTurn`` to yield immediately when the budget is truly
+        exceeded and cannot be compacted away.
+        """
+        from py_claw.services.cost_tracker import check_budget_exceeded
+
+        exceeded, reason = check_budget_exceeded(self.state)
+        if not exceeded:
+            return None
+
+        # Budget exceeded -- try auto-compact first
+        try:
+            from py_claw.services.compact.auto_trigger import should_auto_compact
+
+            model = self.state.model or "claude-sonnet-4-20250514"
+            total_tokens = self.state.session_input_tokens + self.state.session_output_tokens
+            result = should_auto_compact(total_tokens=total_tokens, model=model)
+            if result.should_trigger:
+                warning = self._build_budget_warning_message(reason, auto_compacting=True)
+                if warning is not None:
+                    tool_outputs.append(warning)
+                # Return None to allow the loop to continue -- compact will be
+                # triggered externally by the compact service.
+                return None
+        except Exception:
+            pass
+
+        # Budget truly exceeded and cannot compact -- stop the loop
+        return ExecutedTurn(
+            assistant_text=f"[Budget limit reached: {reason}]",
+            stop_reason="budget_exceeded",
+            usage=executed.usage,
+            model_usage=executed.model_usage,
+            duration_api_ms=executed.duration_api_ms,
+            total_cost_usd=executed.total_cost_usd,
+            tool_calls=[],
+            prompt_suggestion=None,
+        )
+
+    def _check_auto_compact(self, *, tool_outputs: list[StdoutMessage]) -> bool:
+        """Check if auto-compact should be triggered.
+
+        Returns True if a compact was recommended and an informational
+        message was appended to *tool_outputs*.
+        """
+        import importlib
+
+        mod = importlib.import_module("py_claw.services.compact.auto_compact_integration")
+        check_fn = mod.check_and_trigger_auto_compact  # type: ignore[attr-defined]
+
+        triggered, message = check_fn(self.state)
+        if triggered and message:
+            try:
+                from py_claw.schemas.common import SDKLocalCommandOutputMessage
+                from uuid import uuid4
+
+                warning = SDKLocalCommandOutputMessage(
+                    type="system",
+                    subtype="local_command_output",
+                    content=f"📦 {message}",
+                    uuid=str(uuid4()),
+                    session_id=self._session_id or "",
+                )
+                tool_outputs.append(warning)  # type: ignore[arg-type]
+            except Exception:
+                pass
+        return triggered
+
+    def _build_budget_warning_message(
+        self, reason: str, *, auto_compacting: bool = False
+    ) -> StdoutMessage | None:
+        """Build a system message about budget status."""
+        from py_claw.schemas.common import SDKLocalCommandOutputMessage
+        from uuid import uuid4
+
+        suffix = " Auto-compacting context..." if auto_compacting else ""
+        return SDKLocalCommandOutputMessage(  # type: ignore[return-value]
+            type="system",
+            subtype="local_command_output",
+            content=f"⚠️ Budget warning: {reason}{suffix}",
+            uuid=str(uuid4()),
+            session_id=self._session_id or "",
+        )
 
     def _advance_turn_state_after_tool_calls(self, tool_calls: list[ToolCallRequest]) -> None:
         turn_state = self._active_turn_state
@@ -1457,6 +1692,20 @@ class QueryRuntime:
         if len(error.args) == 1 and isinstance(error.args[0], str):
             return error.args[0]
         return str(error)
+
+    def _run_stop_hooks(self, executed: ExecutedTurn, *, session_id: str, subagent_id: str | None = None) -> Any:
+        """Run stop hooks after model response."""
+        from py_claw.query.stop_hooks import handle_stop_hooks, StopHookResult
+        try:
+            return handle_stop_hooks(
+                self.state,
+                session_id=session_id,
+                last_assistant_message=executed.assistant_text[:2000],  # Truncate for hook input
+                subagent_id=subagent_id,
+            )
+        except Exception:
+            # Stop hooks should never crash the query loop
+            return StopHookResult()
 
     def _reset_session_state(self) -> None:
         if self._session_id is not None:
