@@ -22,6 +22,8 @@ from py_claw.ui.widgets.list_item import ListItem
 
 
 class QuickOpenDialog(Vertical):
+
+    can_focus = True  # overlays must be focusable for their key bindings (Esc) to fire
     """Quick open dialog — fuzzy file search.
 
     Searches files in the current working directory.

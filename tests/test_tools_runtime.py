@@ -46,7 +46,7 @@ def _settings_with_permissions(*, allow: list[str] | None = None, deny: list[str
 def _python_print_json(payload: dict[str, object]) -> str:
     encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
     return (
-        "python - <<'PY'\n"
+        f"{sys.executable} - <<'PY'\n"
         "import base64\n"
         f"print(base64.b64decode({encoded!r}).decode('utf-8'))\n"
         "PY"
@@ -769,7 +769,7 @@ def test_tool_runtime_execute_list_mcp_resources_returns_honest_degraded_result(
         cwd=str(tmp_path),
         flag_settings={
             "mcp": {
-                "local": {"command": "python", "args": ["-m", "server"]},
+                "local": {"command": sys.executable, "args": ["-m", "server"]},
                 "remote": {"type": "http", "url": "https://example.com/mcp"},
             }
         },
@@ -827,7 +827,7 @@ def test_tool_runtime_execute_list_mcp_resources_rejects_unknown_server(tmp_path
         cwd=str(tmp_path),
         flag_settings={
             "mcp": {
-                "local": {"command": "python", "args": ["-m", "server"]},
+                "local": {"command": sys.executable, "args": ["-m", "server"]},
             }
         },
     )

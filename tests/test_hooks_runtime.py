@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from pathlib import Path
 
 from py_claw.cli.control import ControlRuntime
@@ -26,7 +27,7 @@ def _hook_settings(event: str, command: str, *, matcher: str | None = None) -> S
 def _python_print_json(payload: dict[str, object]) -> str:
     encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
     return (
-        "python - <<'PY'\n"
+        f"{sys.executable} - <<'PY'\n"
         "import base64\n"
         f"print(base64.b64decode({encoded!r}).decode('utf-8'))\n"
         "PY"
@@ -37,7 +38,7 @@ def _python_write_text(path: Path, text: str) -> str:
     encoded_path = base64.b64encode(str(path).encode("utf-8")).decode("ascii")
     encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return (
-        "python - <<'PY'\n"
+        f"{sys.executable} - <<'PY'\n"
         "import base64\n"
         "from pathlib import Path\n"
         f"path = Path(base64.b64decode({encoded_path!r}).decode('utf-8'))\n"
@@ -329,7 +330,7 @@ def test_worktree_create_hook_can_block(tmp_path) -> None:
 def test_worktree_remove_hook_nonzero_exit_does_not_block_by_default(tmp_path) -> None:
     settings = _hook_settings(
         "WorktreeRemove",
-        "python - <<'PY'\nimport sys\nsys.exit(7)\nPY",
+        f"{sys.executable} - <<'PY'\nimport sys\nsys.exit(7)\nPY",
     )
 
     result = HookRuntime().run_worktree_remove(
@@ -552,7 +553,7 @@ def test_worktree_remove_hook_captures_execution_record(tmp_path) -> None:
 def test_worktree_remove_hook_preserves_execution_record_on_failure(tmp_path) -> None:
     settings = _hook_settings(
         "WorktreeRemove",
-        "python - <<'PY'\nimport sys\nprint('fail')\nsys.exit(2)\nPY",
+        f"{sys.executable} - <<'PY'\nimport sys\nprint('fail')\nsys.exit(2)\nPY",
     )
 
     result = HookRuntime().run_worktree_remove(

@@ -208,7 +208,7 @@ _HELP_SHORTCUTS: dict[str, str] = {
     "ctrl+c": "Quit",
     "ctrl+r": "History search",
     "ctrl+p": "Quick open",
-    "ctrl+m": "Model picker",
+    "ctrl+m": "Model picker (Ctrl+M is Enter on many terminals — use /model)",
     "ctrl+t": "Tasks panel",
     "i": "Insert mode (vim)",
     "a": "Append mode (vim)",
@@ -218,7 +218,7 @@ _HELP_SHORTCUTS: dict[str, str] = {
 
 
 _STATUS_SHORTCUTS = "Ctrl+G new · Ctrl+L clear · ?: help"
-_FOOTER_SHORTCUTS = "help · Ctrl+R: history · Ctrl+P: files · Ctrl+M: model · Ctrl+T: tasks"
+_FOOTER_SHORTCUTS = "help · Ctrl+R: history · /model: model · Ctrl+T: tasks"
 
 
 def get_shortcut_display(action: str) -> str | None:

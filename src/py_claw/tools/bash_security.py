@@ -181,10 +181,13 @@ _DANGEROUS_WRITE_PATHS = (
 def check_path_security(command: str, cwd: str) -> tuple[bool, str | None]:
     """Check if a bash command accesses paths outside the allowed scope.
 
-    Returns (is_safe, reason). Read-only commands are permitted to access any path.
-    Write/delete commands that target paths outside cwd or home are flagged.
-    Writes to dangerous system paths (/dev/sd, /sys/, /proc/, /boot/, /etc/fstab) are always blocked.
-    Path traversal that escapes the resolved cwd is flagged.
+    Returns (is_safe, reason). Read-only commands are permitted to access any
+    path. Only write-intended targets (write/delete commands, or any command
+    with a ``>`` redirect) are scoped to cwd/home; running an interpreter that
+    lives outside the project (e.g. a venv symlinked into /Library) is fine.
+    Writes to dangerous system paths (/dev/sd, /sys/, /proc/, /boot/,
+    /etc/fstab) are always blocked for write-intended commands. Path traversal
+    that escapes the resolved cwd via ``..`` segments is flagged.
 
     On Windows (or when cwd and target are on different drives), only the
     dangerous-system-path check is enforced, since cross-drive relative-to
@@ -197,13 +200,19 @@ def check_path_security(command: str, cwd: str) -> tuple[bool, str | None]:
     home = Path.home().resolve()
 
     cmd = _extract_command(command)
-    if cmd in _READ_ONLY_COMMANDS:
+    has_redirect = ">" in command
+    if cmd in _READ_ONLY_COMMANDS and not has_redirect:
         return True, None
 
     tokens = _extract_path_tokens(command)
     if not tokens:
         return True, None
 
+    # Write intent: an explicit write/delete command, or any command that
+    # redirects output into a file.
+    write_intent = _is_write_command(cmd) or has_redirect
+
+    resolved_tokens: list[tuple[str, Path, str]] = []
     for token in tokens:
         if not token:
             continue
@@ -212,22 +221,30 @@ def check_path_security(command: str, cwd: str) -> tuple[bool, str | None]:
             abs_path = Path(expanded).resolve()
         except (OSError, ValueError):
             continue
+        resolved_tokens.append((token, abs_path, expanded))
 
-        abs_str = str(abs_path)
-
-        # Always block writes to dangerous system paths
-        # Check the original token (Unix-style) and the normalized resolved path
-        token_norm = token.replace("\\", "/")
-        abs_str_norm = abs_str.replace("\\", "/")
+    def _is_dangerous(abs_str: str, token: str) -> bool:
         for dangerous in _DANGEROUS_WRITE_PATHS:
             normalized_dangerous = dangerous.replace("\\", "/")
+            abs_str_norm = abs_str.replace("\\", "/")
             if (
                 abs_str_norm.startswith(normalized_dangerous)
                 or abs_str_norm == normalized_dangerous.rstrip("/")
-                or token_norm.startswith(normalized_dangerous)
+                or token.replace("\\", "/").startswith(normalized_dangerous)
             ):
-                if _is_write_command(cmd):
-                    return False, f"write to protected path: {token}"
+                return True
+        return False
+
+    # Pass 1: dangerous system paths — checked for every token before any
+    # containment verdict so an input file like /dev/zero cannot shadow an
+    # output file like /dev/sda.
+    if write_intent:
+        for token, abs_path, _expanded in resolved_tokens:
+            if _is_dangerous(str(abs_path), token) or _is_dangerous(token, token):
+                return False, f"write to protected path: {token}"
+
+    for token, abs_path, expanded in resolved_tokens:
+        abs_str = str(abs_path)
 
         # On Windows, also check for Windows-specific dangerous paths
         # device names and critical system file locations
@@ -236,18 +253,33 @@ def check_path_security(command: str, cwd: str) -> tuple[bool, str | None]:
             token_upper = token.upper()
             # Windows device names (NUL, CON, PRN, AUX, COM1, LPT1, etc.)
             if _re.match(r"^[A-Z]:?\\?(NUL|CON|PRN|AUX|COM[1-9]|LPT[1-9])(\.|\\|/|:|$)", token_upper, _re.IGNORECASE):
-                if _is_write_command(cmd):
+                if write_intent:
                     return False, f"write to Windows device: {token}"
             # Windows SAM/System hive writes
             if "SYSTEM32\\CONFIG\\SAM" in token_upper or "SYSTEM32\\CONFIG\\SYSTEM" in token_upper:
-                if _is_write_command(cmd):
+                if write_intent:
                     return False, f"write to protected Windows registry hive: {token}"
-
-        # On Windows, skip cross-drive containment checks
-        if is_windows:
             continue
 
-        # Check if path is within cwd or home
+        # Path traversal written with explicit ".." segments — the resolved
+        # path loses them, so check the raw token. macOS resolves /home to
+        # /System/Volumes/home, which previously hid the traversal entirely.
+        if write_intent and ".." in Path(expanded).parts:
+            within_cwd = True
+            try:
+                abs_path.relative_to(resolved_cwd)
+            except ValueError:
+                try:
+                    abs_path.relative_to(home)
+                except ValueError:
+                    within_cwd = False
+            if not within_cwd:
+                return False, f"path traversal escape: {abs_str}"
+
+        # Containment only applies to write-intended targets. /dev/null is a
+        # conventional bit-bucket, not a real write.
+        if not write_intent or abs_str == "/dev/null":
+            continue
         try:
             abs_path.relative_to(resolved_cwd)
         except ValueError:
@@ -255,15 +287,6 @@ def check_path_security(command: str, cwd: str) -> tuple[bool, str | None]:
                 abs_path.relative_to(home)
             except ValueError:
                 return False, f"path outside cwd/home: {abs_str}"
-
-        # Check for path traversal that escapes cwd
-        if ".." in abs_path.parts and abs_path.is_absolute():
-            try:
-                rel = abs_path.relative_to(resolved_cwd)
-                if ".." in rel.parts:
-                    return False, f"path traversal escape: {abs_str}"
-            except ValueError:
-                pass
 
     return True, None
 

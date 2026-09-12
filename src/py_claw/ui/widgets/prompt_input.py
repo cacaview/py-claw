@@ -629,23 +629,24 @@ class PromptInput(Vertical):
             self.post_message(self.HelpToggled())
             return
 
-        # Tab: accept ghost text (from suggester) or selected suggestion
+        # Tab: accept the highlighted suggestion list item first, then the
+        # inline ghost text. The list is what the user sees highlighted, so it
+        # must win over the suggester's ghost (the two can rank candidates
+        # differently — e.g. typing "/mo" ghosts "/mobile" but highlights
+        # "/model" in the list).
         if event.key in {"tab", "right"}:
             event.stop()
-            # First: check if Input has ghost text from suggester
-            if hasattr(inp, "_suggestion") and inp._suggestion:
-                # Accept inline ghost text (mirrors Input.action_cursor_right logic)
-                inp.value = inp._suggestion
-                inp.cursor_position = len(inp.value)
-                # Clear our suggestion list to stay in sync
-                self.suggestion_items = []  # type: ignore[assignment]
-                self.selected_index = -1
-            elif self.suggestion_items:
-                # Fall back to suggestion list
+            if self.suggestion_items:
                 if self.selected_index < 0:
                     self.accept_best_suggestion()
                 else:
                     self.apply_selected_suggestion()
+            elif hasattr(inp, "_suggestion") and inp._suggestion:
+                # Accept inline ghost text (mirrors Input.action_cursor_right logic)
+                inp.value = inp._suggestion
+                inp.cursor_position = len(inp.value)
+                self.suggestion_items = []  # type: ignore[assignment]
+                self.selected_index = -1
             return
 
         if event.key == "up":

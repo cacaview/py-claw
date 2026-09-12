@@ -36,6 +36,21 @@ from py_claw.ui.widgets.status_line import StatusLine
 from py_claw.ui.widgets.messages import MessageList, MessageItem, MessageRole
 
 
+def _default_model_label() -> str:
+    """Show the actually-configured model instead of a hardcoded Claude name."""
+    try:
+        from py_claw.config import load_config
+
+        cfg = load_config()
+        if cfg.api.model:
+            return cfg.api.model
+    except Exception:
+        pass
+    import os
+
+    return os.environ.get("PY_CLAW_MODEL") or "default"
+
+
 class REPLScreen(Vertical):
     """Main REPL screen component.
 
@@ -75,7 +90,7 @@ class REPLScreen(Vertical):
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        self._model = model or "claude-sonnet-4-20250514"
+        self._model = model or _default_model_label()
         self._status = status
         self._shortcuts = shortcuts or get_status_shortcuts_hint()
         self._prompt_hint = prompt_hint
@@ -432,6 +447,7 @@ class REPLScreen(Vertical):
 
         item = MessageItem(role=msg_role, content=content, timestamp=ts)
         log.add_message(item)
+        return item
 
     def update_last_message(self, content: str, append: bool = False) -> None:
         """Update or append to the last message in the log.
@@ -446,16 +462,31 @@ class REPLScreen(Vertical):
         except Exception:
             pass
 
-    def append_tool_progress(self, tool_name: str, elapsed: float) -> None:
-        """Append tool progress message."""
+    def append_tool_progress(self, tool_name: str, elapsed: float, detail: str = "") -> None:
+        """Append tool progress message, optionally with a run/summary detail."""
         log = self.query_one("#repl-message-log", MessageList)
+        content = f"Tool '{tool_name}' completed in {elapsed:.2f}s"
+        if detail:
+            content = f"{content} — {detail}"
         item = MessageItem(
-            role=MessageRole.TOOL, 
-            content=f"Tool '{tool_name}' completed in {elapsed:.2f}s",
+            role=MessageRole.TOOL,
+            content=content,
             tool_name=tool_name,
             status="complete"
         )
         log.add_message(item)
+
+    def start_assistant_message(self) -> MessageItem:
+        """Append an assistant placeholder and return it for targeted updates."""
+        return self.append_message("assistant", "…")
+
+    def update_message_item(self, item: MessageItem, content: str, append: bool = False) -> None:
+        """Update one specific message item (not just the last one)."""
+        try:
+            log = self.query_one("#repl-message-log", MessageList)
+            log.update_item(item, content, append)
+        except Exception:
+            pass
 
     def append_error(self, error: str) -> None:
         """Append error message."""

@@ -6,7 +6,7 @@ import pytest
 
 from textual.widgets import Static
 
-from tests.test_tui.conftest import apply_compact_layout, type_text
+from .conftest import apply_compact_layout, type_text
 
 pytestmark = pytest.mark.asyncio
 

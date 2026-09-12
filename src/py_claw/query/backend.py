@@ -6,11 +6,14 @@ import math
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import Request
 
 import httpx
+
+from py_claw.utils.http import open_url as _open_url
 
 _logger = logging.getLogger(__name__)
 
@@ -50,6 +53,7 @@ class QueryBackend(Protocol):
     def run_turn(self, prepared: PreparedTurn, context: QueryTurnContext) -> BackendTurnResult: ...
 
 
+@runtime_checkable
 class StreamingQueryBackend(Protocol):
     """A query backend that supports yielding streaming chunks before the final result."""
 
@@ -339,7 +343,7 @@ def _sdk_backend_request(prepared: PreparedTurn, context: QueryTurnContext, sdk_
         method="POST",
     )
     try:
-        with urlopen(request, timeout=30.0) as response:
+        with _open_url(request, timeout=30.0) as response:
             body = response.read().decode("utf-8")
     except HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace").strip()
@@ -390,6 +394,40 @@ class SdkUrlQueryBackend:
         return _sdk_backend_request(prepared, context, self.sdk_url)
 
 
+def _append_query_message(messages: list[dict[str, Any]], query_text: str | None) -> None:
+    """Append the turn's user message unless the transcript already carries it.
+
+    The live query path records the user message in the transcript before the
+    first backend call, so appending unconditionally re-states the instruction
+    AFTER every tool result. The model then faithfully answers the re-stated
+    instruction by calling the tool again — an infinite tool loop. Sub-callers
+    (e.g. the Agent tool) build PreparedTurn with an empty transcript and rely
+    on this append, so it must stay for those cases.
+    """
+    if not query_text:
+        return
+    for message in messages:
+        if message.get("role") == "user" and message.get("content") == query_text:
+            return
+    messages.append({"role": "user", "content": query_text})
+
+
+def _normalize_chat_completions_url(api_url: str) -> str:
+    """Normalize an api_url into a full chat-completions endpoint.
+
+    Users may configure either a base URL (e.g. ``http://host:8002/v1``) or a
+    full endpoint. POST always targets the returned URL, so a bare base URL
+    must get ``/chat/completions`` appended.
+    """
+    url = (api_url or "").strip().rstrip("/")
+    if not url:
+        return url
+    path = urlparse(url).path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        return url
+    return f"{url}/chat/completions"
+
+
 class ApiQueryBackend:
     """Query backend for OpenAI/API-compatible endpoints.
 
@@ -406,7 +444,7 @@ class ApiQueryBackend:
         tools: list[dict[str, object]] | None = None,
     ) -> None:
         self._api_key = api_key
-        self._api_url = api_url
+        self._api_url = _normalize_chat_completions_url(api_url)
         self._model = model or "gpt-5.4"
         self._max_output_tokens = max_output_tokens
         self._tools = tools
@@ -457,7 +495,7 @@ def _parse_sse_stream_with_tools(sse_text: str) -> tuple[str, str, list[BackendT
         if event_type == "content_block_delta":
             delta = event.get("delta", {})
             if delta.get("type") == "text_delta":
-                assistant_parts.append(delta.get("text", ""))
+                assistant_parts.append(delta.get("text") or "")
             elif delta.get("type") == "input_json_delta":
                 # Tool call arguments in streaming mode
                 if current_tool_call is not None:
@@ -504,7 +542,7 @@ def _parse_sse_stream_with_tools(sse_text: str) -> tuple[str, str, list[BackendT
             if choices:
                 delta = choices[0].get("delta", {})
                 if "content" in delta:
-                    assistant_parts.append(delta.get("content", ""))
+                    assistant_parts.append(delta.get("content") or "")
                 finish_reason = choices[0].get("finish_reason")
                 if finish_reason:
                     stop_reason = "end_turn" if finish_reason == "stop" else finish_reason
@@ -544,8 +582,7 @@ def _api_request(
 ) -> BackendTurnResult:
     """Call OpenAI/API-compatible /v1/messages with streaming SSE, parse into BackendTurnResult."""
     messages = _transcript_to_openai_messages(context.transcript)
-    if prepared.query_text:
-        messages.append({"role": "user", "content": prepared.query_text})
+    _append_query_message(messages, prepared.query_text)
 
     system_parts: list[str] = []
     if prepared.system_prompt:
@@ -554,14 +591,20 @@ def _api_request(
         system_parts.append(prepared.append_system_prompt)
     system = "\n\n".join(system_parts) if system_parts else None
 
+    # Send the system prompt as a standard role=system message. OpenAI-
+    # compatible servers (vLLM included) silently ignore a top-level
+    # "system" body field — verified experimentally: prompt_tokens stays
+    # flat with body["system"] but grows with a role=system message — so
+    # the prompt previously never reached the model.
+    if system:
+        messages = [{"role": "system", "content": system}] + messages
+
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": max_output_tokens,
         "stream": True,
     }
-    if system:
-        body["system"] = system
     if tools:
         body["tools"] = tools
 
@@ -574,10 +617,10 @@ def _api_request(
     try:
         with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
             if resp.status_code != 200:
-                raise RuntimeError(f"Right codes API returned HTTP {resp.status_code}: {resp.text[:200]}")
+                raise RuntimeError(f"API request failed: HTTP {resp.status_code}: {resp.text[:200]}")
             text = resp.read().decode("utf-8")
     except httpx.HTTPError as exc:
-        raise RuntimeError(f"Right codes API request failed: {exc}") from exc
+        raise RuntimeError(f"API request failed: {exc}") from exc
 
     # Parse SSE stream
     assistant_text, stop_reason, tool_calls = _parse_sse_stream_with_tools(text)
@@ -606,8 +649,7 @@ def _api_request_streaming(
     Accumulates full SSE response and parses it at the end to extract tool_calls properly.
     """
     messages: list[dict[str, Any]] = _transcript_to_openai_messages(context.transcript)
-    if prepared.query_text:
-        messages.append({"role": "user", "content": prepared.query_text})
+    _append_query_message(messages, prepared.query_text)
 
     system_parts: list[str] = []
     if prepared.system_prompt:
@@ -616,14 +658,20 @@ def _api_request_streaming(
         system_parts.append(prepared.append_system_prompt)
     system = "\n\n".join(system_parts) if system_parts else None
 
+    # Send the system prompt as a standard role=system message. OpenAI-
+    # compatible servers (vLLM included) silently ignore a top-level
+    # "system" body field — verified experimentally: prompt_tokens stays
+    # flat with body["system"] but grows with a role=system message — so
+    # the prompt previously never reached the model.
+    if system:
+        messages = [{"role": "system", "content": system}] + messages
+
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": max_output_tokens,
         "stream": True,
     }
-    if system:
-        body["system"] = system
     if tools:
         body["tools"] = tools
 
@@ -639,7 +687,7 @@ def _api_request_streaming(
     try:
         with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
             if resp.status_code != 200:
-                raise RuntimeError(f"Right codes API returned HTTP {resp.status_code}: {resp.text[:200]}")
+                raise RuntimeError(f"API request failed: HTTP {resp.status_code}: {resp.text[:200]}")
             for line in resp.iter_lines():
                 if not line:
                     continue
@@ -661,15 +709,30 @@ def _api_request_streaming(
                     msg = event.get("message", {})
                     stop_reason = msg.get("stop_reason") or "end_turn"
                     yield BackendChunk(type="stop_reason", stop_reason=stop_reason)
+                elif event.get("object") == "chat.completion.chunk":
+                    # OpenAI Chat Completions streaming: emit text live so
+                    # callers can render incremental output.
+                    choices = event.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        content = delta.get("content")
+                        if isinstance(content, str) and content:
+                            yield BackendChunk(type="text_delta", text=content)
+                        finish_reason = choices[0].get("finish_reason")
+                        if finish_reason:
+                            yield BackendChunk(
+                                type="stop_reason",
+                                stop_reason="end_turn" if finish_reason == "stop" else finish_reason,
+                            )
     except httpx.HTTPError as exc:
-        raise RuntimeError(f"Right codes API request failed: {exc}") from exc
+        raise RuntimeError(f"API request failed: {exc}") from exc
 
     # Parse the accumulated SSE to extract tool_calls
     if sse_parts:
         sse_text = "\n".join(sse_parts)
         _, stop_reason, tool_calls = _parse_sse_stream_with_tools(sse_text)
         if tool_calls:
-            yield BackendChunk(type="tool_calls", text=json.dumps([tc.__dict__ for tc in tool_calls]))
+            yield BackendChunk(type="tool_calls", text=json.dumps([asdict(tc) for tc in tool_calls]))
 
 
 class AnthropicQueryBackend:
@@ -708,8 +771,7 @@ class AnthropicQueryBackend:
         dict_messages = _transcript_to_messages(context.transcript)
 
         # Add the current query as a user message
-        if prepared.query_text:
-            dict_messages.append({"role": "user", "content": prepared.query_text})
+        _append_query_message(dict_messages, prepared.query_text)
 
         # Convert to MessageParam for the API client
         messages = [MessageParam(role=m["role"], content=m["content"]) for m in dict_messages]
@@ -862,10 +924,33 @@ def _transcript_to_openai_messages(transcript: list[object]) -> list[dict[str, A
 
 
 def _format_tool_result_content(content: Any) -> str:
-    """Format tool result content as a string for OpenAI API."""
+    """Format tool result content as a string for the model.
+
+    Structured tool outputs mix model-relevant fields (stdout/stderr/exit
+    code) with harness metadata (security classification). Sending that
+    metadata verbatim makes weaker models re-issue the same call, so render a
+    plain-text view here while the transcript itself stays structured.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, dict):
+        if "stdout" in content or "stderr" in content or "exitCode" in content:
+            parts: list[str] = []
+            stdout = content.get("stdout")
+            if stdout:
+                parts.append(str(stdout).rstrip("\n"))
+            stderr = content.get("stderr")
+            if stderr:
+                parts.append(f"stderr:\n{str(stderr).rstrip()}")
+            exit_code = content.get("exitCode")
+            if exit_code not in (None, 0):
+                parts.append(f"exit code: {exit_code}")
+            if parts:
+                return "\n".join(parts)
+        if isinstance(content.get("content"), str):
+            return content["content"]
+        if isinstance(content.get("text"), str):
+            return content["text"]
         return json.dumps(content, ensure_ascii=False)
     if isinstance(content, list):
         return json.dumps(content, ensure_ascii=False)

@@ -36,6 +36,8 @@ class TaskEntry:
 
 
 class TasksPanel(Vertical):
+
+    can_focus = True  # overlays must be focusable for their key bindings (Esc) to fire
     """Background tasks panel.
 
     Shows running/completed tasks with status indicators.

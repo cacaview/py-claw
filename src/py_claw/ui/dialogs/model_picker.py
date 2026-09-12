@@ -72,6 +72,8 @@ _AVAILABLE_MODELS: list[ModelInfo] = [
 
 
 class ModelPickerDialog(Vertical):
+
+    can_focus = True  # overlays must be focusable for their key bindings (Esc) to fire
     """Model selection dialog.
 
     Shows a searchable list of available models.

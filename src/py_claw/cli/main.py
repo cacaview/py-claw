@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from typing import Sequence, TextIO
@@ -13,6 +14,7 @@ from py_claw.config import load_config
 from py_claw.query import QueryRuntime, SdkUrlQueryBackend
 from py_claw.query.backend import ApiQueryBackend
 from py_claw.schemas.control import SDKControlRequestEnvelope, SDKControlResponseEnvelope
+from py_claw.schemas.common import SDKUserMessage
 from py_claw.ui.textual_app import run_textual_ui
 
 
@@ -62,6 +64,7 @@ def _build_state(args: argparse.Namespace) -> RuntimeState:
     else:
         cfg = load_config()
         if cfg.api.is_configured():
+            state.model = cfg.api.model or None
             # Get tool definitions from tool_runtime
             tool_defs: list[tuple[str, type] | None] = []
             if state.tool_runtime and state.tool_runtime.registry:
@@ -79,6 +82,59 @@ def _build_state(args: argparse.Namespace) -> RuntimeState:
                 tools=tools,
             )
     return state
+
+
+def _read_print_prompt(args: argparse.Namespace, stdin: TextIO) -> str:
+    """Prompt for --print: the positional arg, else piped stdin text."""
+    if args.prompt:
+        return args.prompt
+    try:
+        if not stdin.isatty():
+            piped = stdin.read()
+            if piped.strip():
+                return piped
+    except Exception:
+        pass
+    return ""
+
+
+def _run_print_mode(args: argparse.Namespace, stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
+    """One-shot print mode: run a single turn and emit the result."""
+    state = _build_state(args)
+    if state.query_backend is None:
+        stderr.write(
+            "py-claw: no API backend configured.\n"
+            "Set ~/.config/py-claw/config.json with api.api_key / api.api_url / api.model.\n"
+        )
+        return 2
+
+    prompt = _read_print_prompt(args, stdin)
+    if not prompt.strip():
+        stderr.write("py-claw: --print requires a prompt (argument or piped stdin).\n")
+        return 2
+
+    query_runtime = QueryRuntime(state)
+    message = SDKUserMessage(type="user", message={"role": "user", "content": prompt}, parent_tool_use_id=None)
+
+    exit_code = 0
+    for outbound in query_runtime.handle_user_message(message):
+        outbound_type = getattr(outbound, "type", None)
+        if outbound_type == "assistant":
+            content = getattr(getattr(outbound, "message", None), "get", lambda _k: None)("content")
+            if args.output_format == "text" and isinstance(content, str) and content.strip():
+                stdout.write(content if content.endswith("\n") else content + "\n")
+                stdout.flush()
+        elif outbound_type == "result":
+            payload = outbound.model_dump(by_alias=True, exclude_none=True)
+            if args.output_format == "json":
+                stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                stdout.flush()
+            elif payload.get("is_error"):
+                errors = payload.get("errors") or []
+                stderr.write("; ".join(str(e) for e in errors) + "\n")
+            if payload.get("is_error"):
+                exit_code = 1
+    return exit_code
 
 
 def _write_control_response(
@@ -157,6 +213,8 @@ def main(
         return run_textual_ui(state, QueryRuntime(state), prompt=args.prompt)
     if args.input_format == "stream-json" and args.output_format == "stream-json":
         return _run_stream_json(args, in_stream, out_stream)
+    if args.print_mode or (args.output_format in ("text", "json") and args.prompt):
+        return _run_print_mode(args, in_stream, out_stream, sys.stderr)
     return 0
 
 

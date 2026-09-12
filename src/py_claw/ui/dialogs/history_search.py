@@ -22,6 +22,8 @@ from py_claw.utils.suggestions.shell_history_completion import get_shell_history
 
 
 class HistorySearchDialog(Vertical):
+
+    can_focus = True  # overlays must be focusable for their key bindings (Esc) to fire
     """Shell history search dialog.
 
     Shows a search input and matching shell commands from history.

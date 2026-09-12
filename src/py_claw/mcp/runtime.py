@@ -8,7 +8,9 @@ import subprocess
 import threading
 import time
 from urllib import error as urllib_error
-from urllib import request as urllib_request
+from urllib import request as urllib_request  # noqa: F401  (Request construction)
+
+from py_claw.utils.http import open_url as _open_url
 
 from pydantic import TypeAdapter
 
@@ -379,7 +381,7 @@ class _SseMcpTransport:
             method="POST",
         )
         try:
-            with urllib_request.urlopen(request, timeout=30) as response:
+            with _open_url(request, timeout=30) as response:
                 payload = response.read().decode("utf-8")
                 if not payload.strip():
                     return {}
@@ -413,7 +415,7 @@ class _SseMcpTransport:
             method="POST",
         )
         try:
-            with urllib_request.urlopen(request, timeout=60) as response:
+            with _open_url(request, timeout=60) as response:
                 # Read SSE stream line by line
                 buffer = ""
                 while True:
@@ -1184,7 +1186,7 @@ def _send_http_message(config: McpHttpServerConfig, message: Any) -> Any:
         method="POST",
     )
     try:
-        with urllib_request.urlopen(request, timeout=30) as response:
+        with _open_url(request, timeout=30) as response:
             payload = response.read().decode("utf-8")
     except urllib_error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

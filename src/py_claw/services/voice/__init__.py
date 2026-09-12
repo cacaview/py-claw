@@ -17,7 +17,6 @@ from .keyterms import (
     detect_phrase_matches,
     extract_keyword_context,
 )
-from .hold_to_talk import HoldToTalk
 from .service import (
     VoiceError,
     VoiceService,
@@ -44,7 +43,6 @@ __all__ = [
     "get_default_input_device",
     "AudioError",
     # Hold-to-talk
-    "HoldToTalk",
     # STT
     "StreamSTT",
     "StreamSTTConfig",

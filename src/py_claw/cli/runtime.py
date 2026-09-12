@@ -68,6 +68,7 @@ class RuntimeState:
     mcp_runtime: McpRuntime = field(default_factory=McpRuntime)
     active_worktree_session: ActiveWorktreeSession | None = None
     advisor_model: str | None = None
+    session_allowed_tools: set[str] = field(default_factory=set)
     permission_ask_callback: Callable[[str, str, dict[str, Any], str | None], tuple[str, dict[str, Any] | None, str | None]] | None = None
     ask_user_callback: Callable[[Any], tuple[str, dict[str, Any] | None]] | None = None
 

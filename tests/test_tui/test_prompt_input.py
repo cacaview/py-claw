@@ -6,7 +6,7 @@ import pytest
 
 from py_claw.ui.typeahead import Suggestion, SuggestionType
 from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode
-from tests.test_tui.conftest import type_text
+from .conftest import type_text
 
 pytestmark = pytest.mark.asyncio
 

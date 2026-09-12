@@ -22,6 +22,27 @@ class TuiRunResult:
 
 DEFAULT_PROMPT_HINT = "Type a prompt or /command"
 
+_TOOL_DETAIL_KEYS = ("command", "file_path", "pattern", "path", "query", "url", "description")
+
+
+def _format_tool_detail(output: object) -> str:
+    """Build a short 'what ran / what it returned' line for the tool log."""
+    tool_input = getattr(output, "tool_input", None) or {}
+    detail = ""
+    for key in _TOOL_DETAIL_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            detail = value.strip().replace("\n", " ")
+            break
+    response = (getattr(output, "tool_response", None) or "").strip()
+    if len(response) > 120:
+        response = response[:119] + "…"
+    if len(detail) > 80:
+        detail = detail[:79] + "…"
+    if detail and response:
+        return f"{detail} → {response}"
+    return detail or response
+
 
 def _prompt_suggestion_item(suggestion: str) -> Suggestion:
     return Suggestion(
@@ -103,12 +124,18 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
     except ImportError as exc:  # pragma: no cover - exercised in manual smoke testing
         raise SystemExit("Textual is required for --tui mode. Install the 'textual' package first.") from exc
 
+    # TUI renders incremental assistant text from partial stream events.
+    state.include_partial_messages = True
+
     command_items = _build_command_items(state)
     engine = SuggestionEngine(command_items=command_items)
 
     class PyClawApp(App):
         TITLE = "py-claw"
         SUB_TITLE = "Terminal UI"
+        # Textual injects a priority ctrl+p -> command_palette binding unless
+        # this is disabled, which hijacks py-claw's Quick Open shortcut.
+        ENABLE_COMMAND_PALETTE = False
 
         CSS = """
         Screen {
@@ -170,6 +197,9 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             )
 
         def on_mount(self) -> None:
+            self._pending_permission_dialog = None
+            self._pending_prompt_dialog = None
+            self._current_worker = None
             state.permission_ask_callback = self._handle_permission_ask
             state.ask_user_callback = self._handle_prompt_ask
             self._focus_prompt()
@@ -225,8 +255,14 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         def _update_last_message(self, text: str, append: bool = False) -> None:
             self._screen().update_last_message(text, append)
 
-        def _append_tool_progress(self, tool_name: str, elapsed: float) -> None:
-            self._screen().append_tool_progress(tool_name, elapsed)
+        def _append_tool_progress(self, tool_name: str, elapsed: float, detail: str = "") -> None:
+            self._screen().append_tool_progress(tool_name, elapsed, detail)
+
+        def _start_assistant_message(self) -> object:
+            return self._screen().start_assistant_message()
+
+        def _update_message_item(self, item: object, text: str) -> None:
+            self._screen().update_message_item(item, text)
 
         def _set_status(self, text: str) -> None:
             self._screen().set_status(text)
@@ -278,52 +314,73 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                 on_decline=handle_decline,
                 id="overlay-prompt"
             )
+            self._pending_prompt_dialog = dialog
             
             def mount_dialog() -> None:
                 self._screen()._register_overlay("prompt-dialog")
                 self._screen().mount(dialog)
-                dialog.focus()
-            
+                try:
+                    dialog.query_one("#btn-confirm").focus()
+                except Exception:
+                    dialog.focus()
+
             self.call_from_thread(mount_dialog)
             event.wait()
+            self._pending_prompt_dialog = None
             return result_box[0]
 
         def _handle_permission_ask(self, tool_use_id: str, tool_name: str, tool_input: dict[str, Any], content: str | None) -> tuple[str, dict[str, Any] | None, str | None]:
             import threading
-            
+
             result_box: list[tuple[str, dict[str, Any] | None, str | None]] = []
             event = threading.Event()
-            
-            def handle_allow() -> None:
-                result_box.append(("allow", None, None))
+
+            def resolve(result: tuple[str, dict[str, Any] | None, str | None]) -> None:
+                if not result_box:
+                    result_box.append(result)
                 self._screen()._unregister_overlay("permission-dialog")
-                dialog.remove()
-                event.set()
-                
-            def handle_deny() -> None:
-                result_box.append(("deny", None, "User denied permission"))
-                self._screen()._unregister_overlay("permission-dialog")
-                dialog.remove()
+                try:
+                    dialog.remove()
+                except Exception:
+                    pass
                 event.set()
 
+            def handle_allow() -> None:
+                resolve(("allow", None, None))
+
+            def handle_always_allow() -> None:
+                # Remember this tool for the rest of the session so later
+                # calls skip the dialog.
+                state.session_allowed_tools.add(tool_name)
+                resolve(("allow", None, None))
+
+            def handle_deny() -> None:
+                resolve(("deny", None, "User denied permission"))
+
             from py_claw.ui.dialogs.permission import PermissionDialog
-            
+
             dialog = PermissionDialog(
                 tool_name=tool_name,
                 message=content or f"{tool_name} requires permission",
                 params=tool_input,
                 on_allow=handle_allow,
+                on_always_allow=handle_always_allow,
                 on_deny=handle_deny,
                 id="overlay-permission",
             )
-            
+            self._pending_permission_dialog = dialog
+
             def mount_dialog() -> None:
                 self._screen()._register_overlay("permission-dialog")
                 self._screen().mount(dialog)
-                dialog.focus()
-            
+                try:
+                    dialog.query_one("#btn-allow").focus()
+                except Exception:
+                    dialog.focus()
+
             self.call_from_thread(mount_dialog)
             event.wait()
+            self._pending_permission_dialog = None
             return result_box[0]
 
         def _handle_input_change(self, text: str) -> None:
@@ -349,6 +406,7 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                 self.call_from_thread(self._focus_prompt)
                 return
 
+            assistant_item = None
             for output in outputs:
                 if worker.is_cancelled:
                     return
@@ -361,20 +419,26 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                     if isinstance(event, dict):
                         event_type = event.get("type")
                         if event_type == "stream_request_start":
-                            self.call_from_thread(self._append_message, "assistant", "thinking...")
+                            assistant_item = self.call_from_thread(self._start_assistant_message)
                         elif event_type == "content_block_delta":
                             delta = event.get("delta", {})
                             if delta.get("type") == "text_delta":
-                                text = delta.get("text", "")
-                                if text:
-                                    self.call_from_thread(self._update_last_message, text, True)
+                                # Partial messages carry the full accumulated
+                                # text so far — replace, don't append.
+                                accumulated = delta.get("text", "")
+                                if accumulated and assistant_item is not None:
+                                    self.call_from_thread(self._update_message_item, assistant_item, accumulated)
                     continue
                 if output_type == "tool_progress":
+                    detail = _format_tool_detail(output)
                     self.call_from_thread(
                         self._append_tool_progress,
                         output.tool_name,
                         output.elapsed_time_seconds,
+                        detail,
                     )
+                    # Text after a tool result belongs to a new assistant message.
+                    assistant_item = None
                     continue
                 if output_type == "prompt_suggestion":
                     self.call_from_thread(self._set_prompt_suggestion, str(output.suggestion))
@@ -386,8 +450,13 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                     else:
                         result_text = payload.get("result")
                         if result_text:
-                            self.call_from_thread(self._update_last_message, str(result_text))
+                            if assistant_item is not None:
+                                self.call_from_thread(self._update_message_item, assistant_item, str(result_text))
+                            else:
+                                self.call_from_thread(self._append_message, "assistant", str(result_text))
+                    assistant_item = None
 
+            state.interrupt_event.clear()
             self.call_from_thread(self._set_status, "idle")
             self.call_from_thread(self._set_hint, DEFAULT_PROMPT_HINT)
             self.call_from_thread(self._focus_prompt)
@@ -399,9 +468,32 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             self._set_suggestions([])
             self._set_status("running")
             self._append_message("user", value)
-            self._run_prompt(value)
+            self._current_worker = self._run_prompt(value)
 
         def _handle_interrupt(self) -> None:
+            # Actually cancel the in-flight turn, not just the status text.
+            try:
+                query_runtime.interrupt()
+            except Exception:
+                pass
+            worker = getattr(self, "_current_worker", None)
+            if worker is not None:
+                try:
+                    worker.cancel()
+                except Exception:
+                    pass
+                self._current_worker = None
+            # Unblock any worker thread waiting on a blocking dialog; for
+            # permission prompts Esc has always meant "deny".
+            for pending in (getattr(self, "_pending_permission_dialog", None), getattr(self, "_pending_prompt_dialog", None)):
+                if pending is not None:
+                    try:
+                        if pending.is_mounted:
+                            pending.deny()
+                        else:
+                            pending.deny()
+                    except Exception:
+                        pass
             self._set_status("interrupted")
             self._set_hint("Cancelled current prompt")
 
@@ -484,6 +576,11 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
 
         def action_new_session(self) -> None:
             screen = self._screen()
+            try:
+                query_runtime.clear_session()
+            except Exception:
+                pass
+            state.session_allowed_tools.clear()
             screen.clear_log()
             screen.set_status("idle")
             screen.set_prompt_hint(DEFAULT_PROMPT_HINT)

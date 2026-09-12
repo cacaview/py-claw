@@ -38,6 +38,13 @@ def is_absolute_path(path: PathLike) -> bool:
     Returns:
         True if path is absolute
     """
+    import re
+
+    text = str(path)
+    # Windows drive-letter paths are absolute regardless of host platform,
+    # so path metadata stays portable across OSes.
+    if re.match(r"^[A-Za-z]:[\\/]", text):
+        return True
     return Path(path).is_absolute()
 
 

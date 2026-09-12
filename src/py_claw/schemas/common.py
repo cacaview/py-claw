@@ -931,7 +931,7 @@ class SDKPermissionDenial(PyClawBaseModel):
 class SDKUserMessage(PyClawBaseModel):
     type: Literal["user"]
     message: Any
-    parent_tool_use_id: str | None
+    parent_tool_use_id: str | None = None
     isSynthetic: bool | None = None
     tool_use_result: Any | None = None
     priority: Literal["now", "next", "later"] | None = None
@@ -943,7 +943,7 @@ class SDKUserMessage(PyClawBaseModel):
 class SDKUserMessageReplay(PyClawBaseModel):
     type: Literal["user"]
     message: Any
-    parent_tool_use_id: str | None
+    parent_tool_use_id: str | None = None
     isSynthetic: bool | None = None
     tool_use_result: Any | None = None
     priority: Literal["now", "next", "later"] | None = None
@@ -1170,6 +1170,8 @@ class SDKToolProgressMessage(PyClawBaseModel):
     parent_tool_use_id: str | None
     elapsed_time_seconds: float
     task_id: str | None = None
+    tool_input: dict[str, Any] | None = None
+    tool_response: str | None = None
     uuid: str
     session_id: str
 

@@ -75,8 +75,12 @@ async def search_sessions(
     projects_to_scan: list[tuple[str | None, Path]] = []
 
     if project_path:
-        # Scan specific project
-        projects_to_scan.append((project_path, Path(project_path)))
+        # Scan the project's session directory under the config home
+        # (~/.claude/projects/<sanitized-cwd>), not the working directory
+        # itself — session files never live in the project tree.
+        from py_claw.services.session_storage.common import get_project_dir
+
+        projects_to_scan.append((project_path, Path(get_project_dir(project_path))))
     else:
         # Scan all projects
         projects_dir = Path(get_projects_dir())

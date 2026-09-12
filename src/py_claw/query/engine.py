@@ -8,7 +8,16 @@ from uuid import uuid4
 
 from py_claw.commands import CommandExecutionResult
 from py_claw.permissions.engine import PermissionEngine
-from py_claw.query.backend import BackendChunk, StreamingQueryBackend, BackendToolCall, BackendTurnResult, PlaceholderQueryBackend, QueryBackend
+from py_claw.query.backend import (
+    BackendChunk,
+    BackendToolCall,
+    BackendTurnResult,
+    PlaceholderQueryBackend,
+    QueryBackend,
+    StreamingQueryBackend,
+    _build_model_usage,
+    _build_usage,
+)
 from py_claw.schemas.common import (
     EffortLevel,
     SDKAssistantMessage,
@@ -142,6 +151,56 @@ def _resolve_query_backend(state: RuntimeState) -> QueryBackend:
     return state.query_backend or PlaceholderQueryBackend()
 
 
+def _model_friendly_tool_output(tool_name: str, output: dict[str, Any]) -> Any:
+    """Render a tool result the way the model should see it.
+
+    The raw tool output mixes model-relevant fields (stdout/stderr/exit code)
+    with harness metadata (security classification). Sending that metadata as
+    part of the conversation makes weaker models re-issue the same call, so
+    the transcript stores a plain-text rendering instead. The structured dict
+    stays available via ``tool_use_result`` for SDK consumers.
+    """
+    if isinstance(output, str):
+        return output
+    if not isinstance(output, dict):
+        return output
+
+    if "stdout" in output or "stderr" in output or "exitCode" in output:
+        parts: list[str] = []
+        stdout = output.get("stdout")
+        if stdout:
+            parts.append(str(stdout).rstrip("\n"))
+        stderr = output.get("stderr")
+        if stderr:
+            parts.append(f"stderr:\n{str(stderr).rstrip()}")
+        exit_code = output.get("exitCode")
+        if exit_code not in (None, 0):
+            parts.append(f"exit code: {exit_code}")
+        if not parts:
+            parts.append("(no output)")
+        return "\n".join(parts)
+
+    if isinstance(output.get("content"), str):
+        return output["content"]
+    if isinstance(output.get("text"), str):
+        return output["text"]
+    try:
+        return json.dumps(output, ensure_ascii=False, default=str)
+    except Exception:
+        return str(output)
+
+
+def _summarize_tool_output(output: Any, limit: int = 400) -> str:
+    """Short single-line-ish preview for tool_progress events / UI display."""
+    if output is None:
+        return ""
+    text = output if isinstance(output, str) else str(output)
+    text = text.strip()
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return text
+
+
 class BackendTurnExecutor:
     def __init__(self, backend: QueryBackend | None = None) -> None:
         self._backend = backend or PlaceholderQueryBackend()
@@ -266,6 +325,40 @@ class PlaceholderTurnDriver:
     def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
         return self._placeholder_executor.execute(prepared, context)
 
+    def execute_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk | BackendTurnResult]:
+        executor = self._placeholder_executor
+        streaming = getattr(executor, "execute_streaming", None)
+        if streaming is None:
+            # Executor only implements the blocking protocol: wrap its result
+            # in the shape the streaming loop consumes.
+            def _wrap() -> Iterator[BackendChunk | BackendTurnResult]:
+                from py_claw.query.backend import BackendToolCall, BackendTurnResult as _BackendTurnResult
+
+                executed = executor.execute(prepared, context)
+                yield _BackendTurnResult(
+                    assistant_text=executed.assistant_text,
+                    stop_reason=executed.stop_reason,
+                    usage=dict(executed.usage),
+                    model_usage=dict(executed.model_usage),
+                    duration_api_ms=executed.duration_api_ms,
+                    total_cost_usd=executed.total_cost_usd,
+                    tool_calls=[
+                        BackendToolCall(
+                            tool_name=call.tool_name,
+                            arguments=dict(call.arguments),
+                            tool_use_id=call.tool_use_id,
+                            parent_tool_use_id=call.parent_tool_use_id,
+                        )
+                        for call in executed.tool_calls
+                    ],
+                    prompt_suggestion=executed.prompt_suggestion,
+                )
+
+            return _wrap()
+        return streaming(prepared, context)
+
     def run_streaming(
         self, prepared: PreparedTurn, context: QueryTurnContext
     ) -> Iterator[BackendChunk | ExecutedTurn]:
@@ -285,6 +378,37 @@ class RuntimeTurnExecutor:
 
     def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
         return self._driver.execute(prepared, context)
+
+    def execute_streaming(
+        self, prepared: PreparedTurn, context: QueryTurnContext
+    ) -> Iterator[BackendChunk | BackendTurnResult]:
+        driver_streaming = getattr(self._driver, "execute_streaming", None)
+        if driver_streaming is not None:
+            return driver_streaming(prepared, context)
+        # Driver without streaming support: wrap the blocking execute and
+        # convert its ExecutedTurn into the BackendTurnResult shape the
+        # streaming loop consumes.
+        def _wrap() -> Iterator[BackendChunk | BackendTurnResult]:
+            executed = self.execute(prepared, context)
+            yield BackendTurnResult(
+                assistant_text=executed.assistant_text,
+                stop_reason=executed.stop_reason,
+                usage=dict(executed.usage),
+                model_usage=dict(executed.model_usage),
+                duration_api_ms=executed.duration_api_ms,
+                total_cost_usd=executed.total_cost_usd,
+                tool_calls=[
+                    BackendToolCall(
+                        tool_name=call.tool_name,
+                        arguments=dict(call.arguments),
+                        tool_use_id=call.tool_use_id,
+                        parent_tool_use_id=call.parent_tool_use_id,
+                    )
+                    for call in executed.tool_calls
+                ],
+                prompt_suggestion=executed.prompt_suggestion,
+            )
+        return _wrap()
 
     def run_streaming(
         self, prepared: PreparedTurn, context: QueryTurnContext
@@ -342,6 +466,7 @@ class QueryRuntime:
         self._turn_in_progress = False
         self._active_turn_state: QueryTurnState | None = None
         self._active_message_uuid: str | None = None
+        self._persisted_transcript_count = 0
 
     @property
     def turn_executor(self) -> TurnExecutor:
@@ -408,6 +533,7 @@ class QueryRuntime:
 
     def replace_transcript(self, transcript: list[object]) -> None:
         self._transcript = list(transcript)
+        self._persisted_transcript_count = 0
         if self._active_turn_state is not None:
             self._active_turn_state.transcript = list(self._transcript)
         if self._session_id is not None:
@@ -452,10 +578,26 @@ class QueryRuntime:
     def _record_turn_completion(self, reset_session: bool) -> None:
         if self._session_id is not None:
             self.save_session_state(self._session_id)
+            self._persist_session_transcript()
         if reset_session:
             self._reset_session_state()
         else:
             self._turn_count += 1
+
+    def _persist_session_transcript(self) -> None:
+        """Append not-yet-persisted transcript entries to the session file."""
+        from py_claw.services.session_storage.writer import append_session_entries
+
+        new_entries = self._transcript[self._persisted_transcript_count:]
+        if not new_entries:
+            return
+        written = append_session_entries(
+            session_id=self._session_id or "",
+            cwd=self.state.cwd,
+            entries=new_entries,
+        )
+        if written:
+            self._persisted_transcript_count += len(new_entries)
 
     def _build_assistant_outputs(
         self,
@@ -542,6 +684,8 @@ class QueryRuntime:
         )
         tool_outputs: list[StdoutMessage] = []
         web_search_requests = 0
+        previous_call_signature: str | None = None
+        identical_call_streak = 0
         try:
             for _ in range(self._MAX_TOOL_CONTINUATIONS):
                 executed: ExecutedTurn | None = None
@@ -580,6 +724,11 @@ class QueryRuntime:
                         yield self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), list(tool_outputs)
                         return
 
+                self._guard_against_tool_loop(executed.tool_calls, previous_call_signature=previous_call_signature, streak=identical_call_streak, tool_outputs=tool_outputs)
+                previous_call_signature, identical_call_streak = self._track_tool_call_streak(
+                    executed.tool_calls, previous_call_signature, identical_call_streak
+                )
+
                 # Common path: executed with tool_calls
                 try:
                     new_outputs, new_web_search = self._execute_tool_calls(prepared, executed.tool_calls)
@@ -593,7 +742,13 @@ class QueryRuntime:
         finally:
             self._turn_in_progress = previous_in_progress
             self._active_turn_state = None
-        raise QueryTurnFailure(RuntimeError("Query exceeded maximum tool continuations"), tool_outputs)
+        raise QueryTurnFailure(
+            RuntimeError(
+                f"Turn stopped after {self._MAX_TOOL_CONTINUATIONS} tool continuations without a final answer. "
+                "The model kept requesting tool calls; check the tool results above or reduce the task scope."
+            ),
+            tool_outputs,
+        )
 
     def _execute_turn_with_outputs(self, prepared: PreparedTurn) -> tuple[ExecutedTurn, list[StdoutMessage]]:
         """Synchronous version for backward compatibility."""
@@ -608,6 +763,8 @@ class QueryRuntime:
         )
         tool_outputs: list[StdoutMessage] = []
         web_search_requests = 0
+        previous_call_signature: str | None = None
+        identical_call_streak = 0
         try:
             for _ in range(self._MAX_TOOL_CONTINUATIONS):
                 executed = self._turn_executor.execute(prepared, self._current_turn_context())
@@ -615,6 +772,10 @@ class QueryRuntime:
                     raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
                 if not executed.tool_calls:
                     return self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), tool_outputs
+                self._guard_against_tool_loop(executed.tool_calls, previous_call_signature=previous_call_signature, streak=identical_call_streak, tool_outputs=tool_outputs)
+                previous_call_signature, identical_call_streak = self._track_tool_call_streak(
+                    executed.tool_calls, previous_call_signature, identical_call_streak
+                )
                 try:
                     new_outputs, new_web_search_requests = self._execute_tool_calls(prepared, executed.tool_calls)
                     tool_outputs.extend(new_outputs)
@@ -627,7 +788,85 @@ class QueryRuntime:
         finally:
             self._active_turn_state = None
             self._turn_in_progress = previous_in_progress
-        raise QueryTurnFailure(RuntimeError("Query exceeded maximum tool continuations"), tool_outputs)
+        raise QueryTurnFailure(
+            RuntimeError(
+                f"Turn stopped after {self._MAX_TOOL_CONTINUATIONS} tool continuations without a final answer. "
+                "The model kept requesting tool calls; check the tool results above or reduce the task scope."
+            ),
+            tool_outputs,
+        )
+
+    def _to_executed_turn(self, result: BackendTurnResult) -> ExecutedTurn:
+        """Convert a backend turn result into the engine turn shape."""
+        return ExecutedTurn(
+            assistant_text=result.assistant_text,
+            stop_reason=result.stop_reason,
+            usage=dict(result.usage),
+            model_usage=dict(result.model_usage),
+            duration_api_ms=result.duration_api_ms,
+            total_cost_usd=result.total_cost_usd,
+            tool_calls=[
+                ToolCallRequest(
+                    tool_name=tool_call.tool_name,
+                    arguments=dict(tool_call.arguments),
+                    tool_use_id=tool_call.tool_use_id,
+                    parent_tool_use_id=tool_call.parent_tool_use_id,
+                )
+                for tool_call in result.tool_calls
+            ],
+            prompt_suggestion=result.prompt_suggestion,
+        )
+
+    @staticmethod
+    def _tool_call_signature(tool_calls: list[ToolCallRequest]) -> str:
+        """Signature used to detect the model repeating identical calls."""
+        parts: list[str] = []
+        for call in tool_calls:
+            try:
+                args = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, default=str)
+            except Exception:
+                args = str(call.arguments)
+            parts.append(f"{call.tool_name}:{args}")
+        return "|".join(parts)
+
+    def _track_tool_call_streak(
+        self,
+        tool_calls: list[ToolCallRequest],
+        previous_signature: str | None,
+        streak: int,
+    ) -> tuple[str | None, int]:
+        signature = self._tool_call_signature(tool_calls)
+        if previous_signature is not None and signature == previous_signature:
+            return signature, streak + 1
+        return signature, 1
+
+    def _guard_against_tool_loop(
+        self,
+        tool_calls: list[ToolCallRequest],
+        *,
+        previous_call_signature: str | None,
+        streak: int,
+        tool_outputs: list[StdoutMessage] | None = None,
+    ) -> None:
+        """Abort the turn when the model repeats the exact same tool calls.
+
+        Weak OpenAI-compatible models sometimes re-issue the identical call
+        indefinitely; each extra round costs a full prompt re-send, so stop
+        after two consecutive identical rounds with an actionable message.
+        """
+        if previous_call_signature is None or streak < 2:
+            return
+        if self._tool_call_signature(tool_calls) != previous_call_signature:
+            return
+        names = ", ".join(dict.fromkeys(call.tool_name for call in tool_calls))
+        raise QueryTurnFailure(
+            RuntimeError(
+                f"Tool call loop detected: {names} was issued with identical arguments "
+                f"{streak + 1} times in a row. The model is not progressing; interrupt the turn "
+                "or rephrase the request."
+            ),
+            partial_outputs=tool_outputs,
+        )
 
     def _apply_tool_usage_metrics(self, executed: ExecutedTurn, *, web_search_requests: int) -> ExecutedTurn:
         if web_search_requests <= 0:
@@ -728,8 +967,13 @@ class QueryRuntime:
         if not explicit_allow:
             permission_target = runtime.permission_target_for(tool_call.tool_name, tool_input)
             evaluation = permission_engine.evaluate(permission_target.tool_name, permission_target.content)
-            
-            if evaluation.behavior == "ask":
+
+            if evaluation.behavior == "ask" and tool_call.tool_name in self.state.session_allowed_tools:
+                # User chose "always allow" for this tool earlier in the session.
+                explicit_allow = True
+                evaluation.behavior = "allow"
+                evaluation.reason = "session_allow"
+            elif evaluation.behavior == "ask":
                 callback = getattr(self.state, "permission_ask_callback", None)
                 if callback is not None:
                     behavior, updated_input, callback_msg = callback(
@@ -748,7 +992,7 @@ class QueryRuntime:
                 message = runtime._build_permission_message(tool_call.tool_name, evaluation.reason, evaluation.mode)
                 if getattr(evaluation, "reason", None) == "User denied permission":
                     message = "User denied permission"
-                
+
                 self.state.hook_runtime.run_permission_denied(
                     settings=settings,
                     cwd=self.state.cwd,
@@ -773,6 +1017,9 @@ class QueryRuntime:
             permission_mode=self.state.permission_mode,
         )
         elapsed = max(perf_counter() - started, 0.0)
+        # The transcript keeps the structured output (SDK consumers rely on
+        # it); the model-friendly plain-text rendering happens in the backend
+        # when the transcript is converted to provider messages.
         self._transcript.append(
             self._synthetic_tool_result_message(
                 self._session_id or str(uuid4()),
@@ -786,6 +1033,8 @@ class QueryRuntime:
             tool_name=result.tool_name,
             parent_tool_use_id=parent_tool_use_id or None,
             elapsed_seconds=elapsed,
+            tool_input=tool_input,
+            tool_response=_summarize_tool_output(_model_friendly_tool_output(result.tool_name, result.output)),
         )
 
     def _execute_prepared_turn(
@@ -842,6 +1091,7 @@ class QueryRuntime:
     def _handle_user_message_gen(self, message: SDKUserMessage) -> Iterator[StdoutMessage]:
         started = perf_counter()
         session_id = self._ensure_session_id(message.session_id)
+        self.state.interrupt_event.clear()
         settings = self._load_settings()
         normalized_user = self._normalize_user_message(message, session_id)
         self._transcript.append(normalized_user)
@@ -851,15 +1101,7 @@ class QueryRuntime:
         try:
             prepared = self._prepare_turn(normalized_user, settings, session_id)
             generator = self._execute_prepared_turn(prepared, session_id, started)
-            try:
-                yield from generator
-            except StopIteration:
-                # Normal completion
-                pass
-            except RuntimeError:
-                # Python 3.7+: StopIteration raised inside a generator propagates
-                # as RuntimeError through yield from.
-                pass
+            yield from generator
         except Exception as exc:
             # Only reached if _prepare_turn or the outer try block raises
             # before yielding anything from the inner generator.
@@ -955,6 +1197,18 @@ class QueryRuntime:
             updated = replace(updated, max_thinking_tokens=self.state.max_thinking_tokens)
         if updated.system_prompt is None and self.state.system_prompt is not None:
             updated = replace(updated, system_prompt=self.state.system_prompt)
+        backend = self.state.query_backend
+        if updated.system_prompt is None and backend is not None and not isinstance(backend, PlaceholderQueryBackend):
+            # Real backends get the default identity/env/tool-guidance prompt;
+            # the placeholder backend echoes the prompt into its canned reply,
+            # which would turn the guidance into output noise.
+            from py_claw.services.system_prompt import build_default_system_prompt, is_default_system_prompt_enabled
+
+            if is_default_system_prompt_enabled(self.state):
+                try:
+                    updated = replace(updated, system_prompt=build_default_system_prompt(self.state))
+                except Exception:
+                    pass
         if updated.append_system_prompt is None and self.state.append_system_prompt is not None:
             updated = replace(updated, append_system_prompt=self.state.append_system_prompt)
         if updated.json_schema is None and self.state.json_schema is not None:
@@ -1064,6 +1318,8 @@ class QueryRuntime:
         tool_name: str,
         parent_tool_use_id: str | None,
         elapsed_seconds: float,
+        tool_input: dict[str, Any] | None = None,
+        tool_response: str | None = None,
     ) -> SDKToolProgressMessage:
         return SDKToolProgressMessage(
             type="tool_progress",
@@ -1071,6 +1327,8 @@ class QueryRuntime:
             tool_name=tool_name,
             parent_tool_use_id=parent_tool_use_id,
             elapsed_time_seconds=elapsed_seconds,
+            tool_input=tool_input,
+            tool_response=tool_response,
             uuid=str(uuid4()),
             session_id=session_id,
         )
@@ -1193,3 +1451,4 @@ class QueryRuntime:
         self._session_id = None
         self._transcript = []
         self._turn_count = 0
+        self._persisted_transcript_count = 0

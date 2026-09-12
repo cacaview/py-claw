@@ -37,6 +37,7 @@ class Dialog(Container):
     - Support for temporarily disabling cancel keybinding in embedded text input scenarios
     """
 
+    can_focus = True
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
         ("ctrl+c", "cancel", "Cancel"),

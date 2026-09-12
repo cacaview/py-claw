@@ -9,7 +9,7 @@ from py_claw.ui.typeahead import Suggestion, SuggestionType
 from py_claw.ui.widgets.messages import MessageList, MessageRole
 from py_claw.ui.widgets.prompt_footer import PromptFooter
 from py_claw.ui.widgets.prompt_input import PromptInput
-from tests.test_tui.conftest import apply_compact_layout, type_text
+from .conftest import apply_compact_layout, type_text
 
 pytestmark = pytest.mark.asyncio
 

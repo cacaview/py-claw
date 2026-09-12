@@ -61,6 +61,14 @@ class _CustomWriteTool:
         return ToolPermissionTarget(tool_name="Write", content=str(value) if isinstance(value, str) else None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Keep user-level ~/.claude content on this host out of skill/command counts."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    yield
+
+
+
 def _runtime_with_custom_write_tool() -> ControlRuntime:
     registry = ToolRegistry()
     registry.register(_CustomWriteTool())
@@ -75,7 +83,7 @@ def _runtime_with_custom_write_tool() -> ControlRuntime:
 def _python_print_json(payload: dict[str, object]) -> str:
     encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
     return (
-        "python - <<'PY'\n"
+        f"{sys.executable} - <<'PY'\n"
         "import base64\n"
         f"print(base64.b64decode({encoded!r}).decode('utf-8'))\n"
         "PY"

@@ -12,7 +12,6 @@ from uuid import uuid4
 from pydantic import Field, model_validator
 
 from py_claw.query.backend import PlaceholderQueryBackend, QueryBackend
-from py_claw.query.engine import PreparedTurn, QueryTurnContext
 from py_claw.schemas.common import AgentDefinition, PyClawBaseModel
 from py_claw.services.agent_registry import get_builtin_agent
 from py_claw.settings.loader import get_settings_with_sources
@@ -20,6 +19,7 @@ from py_claw.tools.base import ToolDefinition, ToolError, ToolPermissionTarget
 
 if TYPE_CHECKING:
     from py_claw.cli.runtime import RuntimeState
+    from py_claw.query.engine import PreparedTurn, QueryTurnContext
     from py_claw.tasks import LocalAgentSession
 
 
@@ -563,6 +563,8 @@ def _run_agent_execution(
     if fork_enabled:
         return _run_forked_agent_execution(state, definition, prompt, model_override, fork_options)
 
+    from py_claw.query.engine import PreparedTurn, QueryTurnContext  # lazy: avoids engine<->tools circular import
+
     backend = _select_backend(state)
     prepared = PreparedTurn(
         query_text=prompt,
@@ -596,6 +598,7 @@ def _run_forked_agent_execution(
 ) -> AgentExecutionResult:
     """Execute agent in a forked subprocess via ForkedAgentBackend."""
     from py_claw.fork.backend import ForkedAgentBackend
+    from py_claw.query.engine import PreparedTurn, QueryTurnContext  # lazy: avoids engine<->tools circular import
 
     backend = ForkedAgentBackend()
     try:

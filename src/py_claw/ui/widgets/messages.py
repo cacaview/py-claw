@@ -158,6 +158,25 @@ class MessageList(ScrollableContainer):
         except Exception:
             pass
 
+    def update_item(self, item: MessageItem, new_content: str, append: bool = False) -> None:
+        """Update the content of a specific message (by identity, not position)."""
+        try:
+            idx = self._messages.index(item)
+        except ValueError:
+            return
+        if append:
+            item.content += new_content
+        else:
+            item.content = new_content
+        try:
+            container = self.query_one(f"#message-{idx}", Vertical)
+            content_widget = container.children[1]
+            if hasattr(content_widget, "update"):
+                content_widget.update(item.content)
+            self.scroll_end(animate=False)
+        except Exception:
+            pass
+
     def clear_messages(self) -> None:
         """Clear all messages."""
         self._messages.clear()

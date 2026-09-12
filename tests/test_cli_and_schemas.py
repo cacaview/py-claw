@@ -1948,22 +1948,29 @@ def test_query_runtime_returns_error_after_max_tool_continuations(tmp_path) -> N
         )
     )
 
-    assert executor.calls == 8
-    assert [context.continuation_count for context in executor.contexts] == list(range(8))
+    # The tool-loop guard stops the turn after the model repeats the exact
+    # same tool calls (name + arguments) on 3 consecutive rounds, instead of
+    # burning all 8 continuations on a stalled loop.
+    # The loop guard lets the third identical model round through (the tool
+    # result has only been seen twice at that point), then stops before the
+    # third tool execution — so tools ran twice for three identical calls.
+    assert executor.calls == 3
+    assert [context.continuation_count for context in executor.contexts] == list(range(3))
     assert executor.contexts[-1].transition_reason == "tool_result:Read"
-    assert len(outputs) == 12
+    assert len(outputs) == 6
     assert isinstance(outputs[0], SDKSessionStateChangedMessage)
     assert outputs[0].state == "running"
     assert isinstance(outputs[1], SDKRequestStartMessage)
     tool_progress = outputs[2:-2]
-    assert len(tool_progress) == 8
+    assert len(tool_progress) == 2
     assert all(isinstance(message, SDKToolProgressMessage) for message in tool_progress)
-    assert [message.tool_use_id for message in tool_progress] == [f"tool-read-{index}" for index in range(1, 9)]
+    assert [message.tool_use_id for message in tool_progress] == [f"tool-read-{index}" for index in range(1, 3)]
     assert isinstance(outputs[-2], SDKResultError)
-    assert outputs[-2].errors == ["Query exceeded maximum tool continuations"]
+    assert outputs[-2].errors is not None
+    assert "Tool call loop detected" in outputs[-2].errors[0]
     assert isinstance(outputs[-1], SDKSessionStateChangedMessage)
     assert outputs[-1].state == "idle"
-    assert len(runtime.transcript) == 17
+    assert len(runtime.transcript) == 5
 
 
 
