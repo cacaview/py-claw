@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from time import perf_counter
@@ -693,6 +694,8 @@ class QueryRuntime:
                 if hasattr(self._turn_executor, "execute_streaming"):
                     accumulated_text = ""
                     streaming_finished = False
+                    stream_usage: dict[str, Any] | None = None
+                    stream_reasoning = ""
                     for item in self._turn_executor.execute_streaming(prepared, self._current_turn_context()):
                         if isinstance(item, BackendChunk):
                             if item.type == "text_delta":
@@ -702,6 +705,13 @@ class QueryRuntime:
                                     yield partial
                             elif item.type == "stop_reason":
                                 streaming_finished = True
+                            elif item.type == "usage":
+                                try:
+                                    stream_usage = json.loads(item.text)
+                                except json.JSONDecodeError:
+                                    stream_usage = None
+                            elif item.type == "reasoning":
+                                stream_reasoning += item.text
                         elif isinstance(item, BackendTurnResult):
                             executed = self._to_executed_turn(item)
                             streaming_finished = True
@@ -710,6 +720,9 @@ class QueryRuntime:
                         raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
 
                     if streaming_finished and executed is not None:
+                        if stream_usage:
+                            from py_claw.query.backend import _openai_usage_to_keys
+                            executed.usage.update(_openai_usage_to_keys(stream_usage))
                         if not executed.tool_calls:
                             yield self._apply_tool_usage_metrics(executed, web_search_requests=web_search_requests), list(tool_outputs)
                             return

@@ -29,6 +29,11 @@ class ApiConfig:
     # Wire protocol spoken at api_url: "openai" (chat completions) or
     # "anthropic" (Messages API). Selects the query backend.
     protocol: str = "openai"
+    # Optional sampling overrides (server defaults apply when None).
+    temperature: float | None = None
+    top_p: float | None = None
+    # Per-request HTTP timeout in seconds.
+    timeout_seconds: int = 120
 
     def is_configured(self) -> bool:
         return bool(self.api_key) and bool(self.api_url)
@@ -101,6 +106,9 @@ def load_config(config_path: Path | None = None) -> Config:
         api_url=api_data.get("api_url", ""),
         model=api_data.get("model", ""),
         protocol=api_data.get("protocol", "openai"),
+        temperature=api_data.get("temperature"),
+        top_p=api_data.get("top_p"),
+        timeout_seconds=api_data.get("timeout_seconds", 120),
     )
 
     return Config(api=api, extra=extra)
@@ -125,6 +133,10 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         raw["api"]["model"] = config.api.model
     if config.api.protocol and config.api.protocol != "openai":
         raw["api"]["protocol"] = config.api.protocol
+    for key in ("temperature", "top_p", "timeout_seconds"):
+        value = getattr(config.api, key)
+        if value is not None and value != 120:
+            raw["api"][key] = value
     raw.update(config.extra)
 
     path.write_text(json.dumps(raw, indent=4, ensure_ascii=False), encoding="utf-8")

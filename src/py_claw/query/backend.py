@@ -32,6 +32,7 @@ class BackendToolCall:
 @dataclass(slots=True)
 class BackendTurnResult:
     assistant_text: str = ""
+    reasoning_text: str = ""
     stop_reason: str = "end_turn"
     usage: dict[str, object] = field(default_factory=dict)
     model_usage: dict[str, object] = field(default_factory=dict)
@@ -442,45 +443,74 @@ class ApiQueryBackend:
         model: str | None = None,
         max_output_tokens: int = 8192,
         tools: list[dict[str, object]] | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        timeout_seconds: float = 120.0,
     ) -> None:
         self._api_key = api_key
         self._api_url = _normalize_chat_completions_url(api_url)
         self._model = model or "gpt-5.4"
         self._max_output_tokens = max_output_tokens
         self._tools = tools
+        self._temperature = temperature
+        self._top_p = top_p
+        self._timeout_seconds = timeout_seconds
 
     def run_turn(self, prepared: PreparedTurn, context: QueryTurnContext) -> BackendTurnResult:
-        return _api_request(prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools)
+        return _api_request(
+            prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools,
+            temperature=self._temperature, top_p=self._top_p, timeout_seconds=self._timeout_seconds,
+        )
 
     def run_turn_streaming(
         self, prepared: PreparedTurn, context: QueryTurnContext
     ) -> Iterator[BackendChunk]:
         return _api_request_streaming(
-            prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools
+            prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools,
+            temperature=self._temperature, top_p=self._top_p, timeout_seconds=self._timeout_seconds,
         )
 
 
-def _parse_sse_stream(sse_text: str) -> tuple[str, str]:
-    """Parse SSE-formatted text into assistant content and stop reason.
+@dataclass
+class _SseParseResult:
+    """Parsed SSE response across both supported wire formats."""
 
-    Handles both OpenAI Responses API SSE format and OpenAI Chat Completions SSE format.
-    Returns (assistant_text, stop_reason).
+    text: str = ""
+    reasoning_text: str = ""
+    stop_reason: str = "end_turn"
+    tool_calls: list[BackendToolCall] = field(default_factory=list)
+    usage: dict[str, Any] | None = None
+
+
+def _parse_sse_payload(sse_text: str) -> _SseParseResult:
+    """Parse an SSE response body into text/reasoning/tool calls/usage.
+
+    Handles the OpenAI Chat Completions formats (streaming chunks and the
+    full non-chunk response) and the Anthropic Responses-style events. Tool
+    calls are aggregated per ``index`` so parallel tool calls survive, and
+    the model-native ``tool_call_id`` is preserved for strict backends that
+    validate id pairing.
     """
-    assistant_text, stop_reason, _ = _parse_sse_stream_with_tools(sse_text)
-    return assistant_text, stop_reason
+    result = _SseParseResult()
+    openai_calls: dict[int, dict[str, Any]] = {}
+    # Anthropic-style pending tool call
+    ant_tool: dict[str, Any] | None = None
+    ant_args = ""
 
-
-def _parse_sse_stream_with_tools(sse_text: str) -> tuple[str, str, list[BackendToolCall]]:
-    """Parse SSE-formatted text into assistant content, stop reason, and tool calls.
-
-    Handles both OpenAI Responses API SSE format and OpenAI Chat Completions SSE format.
-    Returns (assistant_text, stop_reason, tool_calls).
-    """
-    assistant_parts: list[str] = []
-    stop_reason = "end_turn"
-    tool_calls: list[BackendToolCall] = []
-    current_tool_call: dict[str, Any] | None = None
-    current_tool_args = ""
+    def finalize_anthropic() -> None:
+        nonlocal ant_tool, ant_args
+        if ant_tool is not None and ant_args:
+            try:
+                ant_tool["args"] = json.loads(ant_args)
+            except json.JSONDecodeError:
+                pass
+            result.tool_calls.append(BackendToolCall(
+                tool_name=ant_tool.get("name") or "",
+                arguments=ant_tool.get("args") or {},
+                tool_use_id=ant_tool.get("id"),
+            ))
+        ant_tool = None
+        ant_args = ""
 
     for line in sse_text.split("\n"):
         if not line.startswith("data:"):
@@ -490,97 +520,229 @@ def _parse_sse_stream_with_tools(sse_text: str) -> tuple[str, str, list[BackendT
         except json.JSONDecodeError:
             continue
 
-        # Handle OpenAI Responses API format
         event_type = event.get("type")
         if event_type == "content_block_delta":
-            delta = event.get("delta", {})
+            delta = event.get("delta") or {}
             if delta.get("type") == "text_delta":
-                assistant_parts.append(delta.get("text") or "")
-            elif delta.get("type") == "input_json_delta":
-                # Tool call arguments in streaming mode
-                if current_tool_call is not None:
-                    current_tool_args += delta.get("partial_json", "")
+                result.text += delta.get("text") or ""
+            elif delta.get("type") == "input_json_delta" and ant_tool is not None:
+                ant_args += delta.get("partial_json") or ""
         elif event_type == "content_block_stop":
-            # Finish current tool call if any
-            if current_tool_call is not None and current_tool_args:
-                try:
-                    args = json.loads(current_tool_args)
-                    current_tool_call["args"] = args
-                except json.JSONDecodeError:
-                    pass
-                tool_calls.append(BackendToolCall(
-                    tool_name=current_tool_call["name"],
-                    arguments=current_tool_call.get("args", {}),
-                ))
-            current_tool_call = None
-            current_tool_args = ""
+            finalize_anthropic()
         elif event_type == "tool_use":
-            # Start of a tool call
-            name = event.get("name")
-            id_ = event.get("id")
-            current_tool_call = {"name": name, "id": id_}
-            current_tool_args = ""
+            finalize_anthropic()
+            ant_tool = {"name": event.get("name"), "id": event.get("id")}
+            ant_args = ""
         elif event_type == "message_stop":
-            msg = event.get("message", {})
-            stop_reason = msg.get("stop_reason") or "end_turn"
-            # Finalize any remaining tool call
-            if current_tool_call is not None and current_tool_args:
-                try:
-                    args = json.loads(current_tool_args)
-                    current_tool_call["args"] = args
-                except json.JSONDecodeError:
-                    pass
-                tool_calls.append(BackendToolCall(
-                    tool_name=current_tool_call["name"],
-                    arguments=current_tool_call.get("args", {}),
-                ))
-            current_tool_call = None
+            stop = (event.get("message") or {}).get("stop_reason")
+            if stop:
+                result.stop_reason = stop
+            finalize_anthropic()
 
-        # Handle OpenAI Chat Completions format
         elif event.get("object") == "chat.completion.chunk":
-            choices = event.get("choices", [])
+            choices = event.get("choices") or []
             if choices:
-                delta = choices[0].get("delta", {})
-                if "content" in delta:
-                    assistant_parts.append(delta.get("content") or "")
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str):
+                    result.text += content
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                if isinstance(reasoning, str):
+                    result.reasoning_text += reasoning
                 finish_reason = choices[0].get("finish_reason")
                 if finish_reason:
-                    stop_reason = "end_turn" if finish_reason == "stop" else finish_reason
-                # Handle tool_calls in Chat Completions format
-                if "tool_calls" in delta:
-                    for tc in delta["tool_calls"]:
-                        if tc.get("index", 0) == 0:  # First tool call
-                            if "function" in tc:
-                                if current_tool_call is None:
-                                    current_tool_call = {"name": tc["function"]["name"], "args": ""}
-                                current_tool_args += tc["function"].get("arguments", "")
-                # Check for tool call end
-                if finish_reason == "tool_calls" or (finish_reason == "stop" and current_tool_call):
-                    if current_tool_call is not None and current_tool_args:
-                        try:
-                            args = json.loads(current_tool_args)
-                            tool_calls.append(BackendToolCall(
-                                tool_name=current_tool_call["name"],
-                                arguments=args,
-                            ))
-                        except json.JSONDecodeError:
-                            pass
-                    current_tool_call = None
-                    current_tool_args = ""
+                    result.stop_reason = "end_turn" if finish_reason == "stop" else finish_reason
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index") or 0
+                    slot = openai_calls.setdefault(idx, {"id": None, "name": "", "args": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["args"] += fn["arguments"]
+            usage = event.get("usage")
+            if isinstance(usage, dict) and usage:
+                result.usage = usage
 
-    return "".join(assistant_parts), stop_reason, tool_calls
+        elif event.get("object") == "chat.completion":
+            # Full non-chunk response body
+            choices = event.get("choices") or []
+            if choices:
+                message = choices[0].get("message") or {}
+                if isinstance(message.get("content"), str):
+                    result.text += message["content"]
+                reasoning = message.get("reasoning_content") or message.get("reasoning")
+                if isinstance(reasoning, str):
+                    result.reasoning_text += reasoning
+                for tc in message.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    openai_calls[len(openai_calls)] = {
+                        "id": tc.get("id"),
+                        "name": fn.get("name") or "",
+                        "args": fn.get("arguments") or "",
+                    }
+                finish_reason = choices[0].get("finish_reason")
+                if finish_reason:
+                    result.stop_reason = "end_turn" if finish_reason == "stop" else finish_reason
+            usage = event.get("usage")
+            if isinstance(usage, dict) and usage:
+                result.usage = usage
+
+    finalize_anthropic()
+
+    for idx in sorted(openai_calls):
+        slot = openai_calls[idx]
+        if not slot["name"]:
+            continue
+        try:
+            args = json.loads(slot["args"]) if slot["args"] else {}
+        except json.JSONDecodeError:
+            args = {}
+        result.tool_calls.append(BackendToolCall(
+            tool_name=slot["name"],
+            arguments=args,
+            tool_use_id=slot["id"],
+        ))
+    return result
 
 
-def _api_request(
+def _extract_usage_from_sse(sse_text: str) -> dict[str, Any] | None:
+    """Pull the server-reported usage object out of an SSE body, if any."""
+    return _parse_sse_payload(sse_text).usage
+
+
+def _openai_usage_to_keys(usage: dict[str, Any] | None) -> dict[str, object]:
+    """Map an OpenAI usage object onto py-claw usage keys."""
+    if not usage:
+        return {}
+    mapped: dict[str, object] = {}
+    if usage.get("prompt_tokens") is not None:
+        mapped["inputTokens"] = usage["prompt_tokens"]
+    if usage.get("completion_tokens") is not None:
+        mapped["outputTokens"] = usage["completion_tokens"]
+    if usage.get("total_tokens") is not None:
+        mapped["totalTokens"] = usage["total_tokens"]
+    details = usage.get("prompt_tokens_details") or {}
+    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+        mapped["cacheReadInputTokens"] = details["cached_tokens"]
+    return mapped
+
+
+def _parse_sse_stream(sse_text: str) -> tuple[str, str]:
+    """Parse SSE-formatted text into assistant content and stop reason."""
+    parsed = _parse_sse_payload(sse_text)
+    return parsed.text, parsed.stop_reason
+
+
+def _parse_sse_stream_with_tools(sse_text: str) -> tuple[str, str, list[BackendToolCall]]:
+    """Parse SSE-formatted text into assistant content, stop reason, and tool calls."""
+    parsed = _parse_sse_payload(sse_text)
+    return parsed.text, parsed.stop_reason, parsed.tool_calls
+
+
+class ApiRequestError(RuntimeError):
+    """Classified API failure: kind is network | auth | rate_limit | server | protocol."""
+
+    def __init__(self, kind: str, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
+
+
+_RETRYABLE_KINDS = {"network", "rate_limit", "server"}
+
+
+def _classify_http_status(status: int) -> str:
+    if status in (401, 403):
+        return "auth"
+    if status == 429:
+        return "rate_limit"
+    if status >= 500:
+        return "server"
+    return "protocol"
+
+
+def _request_kind_label(kind: str) -> str:
+    return {
+        "network": "network error",
+        "auth": "authentication error (check api_key)",
+        "rate_limit": "rate limited (429)",
+        "server": "server error",
+        "protocol": "request rejected",
+    }.get(kind, kind)
+
+
+def _post_sse(
+    api_url: str,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    timeout_seconds: float,
+    *,
+    max_attempts: int = 3,
+) -> str:
+    """POST and return the full SSE text, with classification and backoff.
+
+    Retries transient failures (network, 429, 5xx). A 400 that names
+    ``stream_options`` falls back to a body without it once (older servers
+    reject the field instead of ignoring it).
+    """
+    import time as _time
+
+    attempt = 0
+    delay = 0.5
+    include_usage = True
+    while True:
+        attempt += 1
+        send_body = dict(body)
+        if send_body.get("stream") and include_usage:
+            send_body["stream_options"] = {"include_usage": True}
+        try:
+            with httpx.stream("POST", api_url, json=send_body, headers=headers, timeout=timeout_seconds) as resp:
+                if resp.status_code != 200:
+                    error_text = resp.read().decode("utf-8", errors="replace")[:300]
+                    if resp.status_code == 400 and "stream_options" in error_text and include_usage:
+                        include_usage = False
+                        continue
+                    kind = _classify_http_status(resp.status_code)
+                    raise ApiRequestError(
+                        kind,
+                        f"API {_request_kind_label(kind)}: HTTP {resp.status_code}: {error_text}",
+                        resp.status_code,
+                    )
+                return resp.read().decode("utf-8")
+        except httpx.HTTPError as exc:
+            if attempt >= max_attempts:
+                raise ApiRequestError("network", f"API network error after {attempt} attempts: {exc}") from exc
+        except ApiRequestError as exc:
+            if exc.kind not in _RETRYABLE_KINDS or attempt >= max_attempts:
+                raise
+        _time.sleep(delay)
+        delay *= 3
+
+
+def _merge_real_usage(
+    usage_dict: dict[str, object],
+    parsed: "_SseParseResult",
+) -> dict[str, object]:
+    """Prefer server-reported token counts over text-length estimates."""
+    real = _openai_usage_to_keys(parsed.usage)
+    usage_dict.update(real)
+    return usage_dict
+
+
+def _build_request_body(
     prepared: PreparedTurn,
     context: QueryTurnContext,
     model: str,
     max_output_tokens: int,
-    api_key: str,
-    api_url: str,
-    tools: list[dict[str, object]] | None = None,
-) -> BackendTurnResult:
-    """Call OpenAI/API-compatible /v1/messages with streaming SSE, parse into BackendTurnResult."""
+    tools: list[dict[str, object]] | None,
+    *,
+    temperature: float | None = None,
+    top_p: float | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Assemble messages and request body shared by both request paths."""
     messages = _transcript_to_openai_messages(context.transcript)
     _append_query_message(messages, prepared.query_text)
 
@@ -594,8 +756,7 @@ def _api_request(
     # Send the system prompt as a standard role=system message. OpenAI-
     # compatible servers (vLLM included) silently ignore a top-level
     # "system" body field — verified experimentally: prompt_tokens stays
-    # flat with body["system"] but grows with a role=system message — so
-    # the prompt previously never reached the model.
+    # flat with body["system"] but grows with a role=system message.
     if system:
         messages = [{"role": "system", "content": system}] + messages
 
@@ -607,31 +768,62 @@ def _api_request(
     }
     if tools:
         body["tools"] = tools
+    if temperature is not None:
+        body["temperature"] = temperature
+    if top_p is not None:
+        body["top_p"] = top_p
+    return messages, body
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    }
 
-    try:
-        with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
-            if resp.status_code != 200:
-                raise RuntimeError(f"API request failed: HTTP {resp.status_code}: {resp.text[:200]}")
-            text = resp.read().decode("utf-8")
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"API request failed: {exc}") from exc
+_API_HEADERS = {
+    "Authorization": "Bearer {api_key}",
+    "Content-Type": "application/json",
+    "Accept": "text/event-stream",
+}
 
-    # Parse SSE stream
-    assistant_text, stop_reason, tool_calls = _parse_sse_stream_with_tools(text)
+
+def _headers_for(api_key: str) -> dict[str, str]:
+    headers = dict(_API_HEADERS)
+    headers["Authorization"] = headers["Authorization"].format(api_key=api_key)
+    return headers
+
+
+def _api_request(
+    prepared: PreparedTurn,
+    context: QueryTurnContext,
+    model: str,
+    max_output_tokens: int,
+    api_key: str,
+    api_url: str,
+    tools: list[dict[str, object]] | None = None,
+    *,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    timeout_seconds: float = 120.0,
+) -> BackendTurnResult:
+    """Call an OpenAI-compatible chat completions endpoint and parse the SSE reply."""
+    _messages, body = _build_request_body(
+        prepared, context, model, max_output_tokens, tools,
+        temperature=temperature, top_p=top_p,
+    )
+    started = time.perf_counter()
+    sse_text = _post_sse(api_url, body, _headers_for(api_key), timeout_seconds)
+    parsed = _parse_sse_payload(sse_text)
+
+    usage_dict = _build_usage(prepared=prepared, assistant_text=parsed.text, backend_type="api")
+    _merge_real_usage(usage_dict, parsed)
+    model_usage_dict = _build_model_usage(prepared=prepared, assistant_text=parsed.text, total_cost_usd=0.0)
+    elapsed_ms = (time.perf_counter() - started) * 1000
 
     return BackendTurnResult(
-        assistant_text=assistant_text,
-        stop_reason=stop_reason,
-        usage=_build_usage(prepared=prepared, assistant_text=assistant_text, backend_type="api"),
-        model_usage=_build_model_usage(prepared=prepared, assistant_text=assistant_text, total_cost_usd=0.0),
-        duration_api_ms=0.0,
-        tool_calls=tool_calls,
+        assistant_text=parsed.text,
+        reasoning_text=parsed.reasoning_text,
+        stop_reason=parsed.stop_reason,
+        usage=usage_dict,
+        model_usage=model_usage_dict,
+        duration_api_ms=elapsed_ms,
+        total_cost_usd=0.0,
+        tool_calls=parsed.tool_calls,
     )
 
 
@@ -643,96 +835,51 @@ def _api_request_streaming(
     api_key: str,
     api_url: str,
     tools: list[dict[str, object]] | None = None,
+    *,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    timeout_seconds: float = 120.0,
 ) -> Iterator[BackendChunk]:
-    """Generator that yields BackendChunk as SSE data arrives.
+    """Generator yielding BackendChunk as SSE data arrives.
 
-    Accumulates full SSE response and parses it at the end to extract tool_calls properly.
+    Emits text deltas live, then parses the accumulated SSE for tool calls
+    (arguments arrive split across chunks) and the server-reported usage.
     """
-    messages: list[dict[str, Any]] = _transcript_to_openai_messages(context.transcript)
-    _append_query_message(messages, prepared.query_text)
+    _messages, body = _build_request_body(
+        prepared, context, model, max_output_tokens, tools,
+        temperature=temperature, top_p=top_p,
+    )
 
-    system_parts: list[str] = []
-    if prepared.system_prompt:
-        system_parts.append(prepared.system_prompt)
-    if prepared.append_system_prompt:
-        system_parts.append(prepared.append_system_prompt)
-    system = "\n\n".join(system_parts) if system_parts else None
+    sse_text = _post_sse(api_url, body, _headers_for(api_key), timeout_seconds)
+    parsed = _parse_sse_payload(sse_text)
 
-    # Send the system prompt as a standard role=system message. OpenAI-
-    # compatible servers (vLLM included) silently ignore a top-level
-    # "system" body field — verified experimentally: prompt_tokens stays
-    # flat with body["system"] but grows with a role=system message — so
-    # the prompt previously never reached the model.
-    if system:
-        messages = [{"role": "system", "content": system}] + messages
-
-    body: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_output_tokens,
-        "stream": True,
-    }
-    if tools:
-        body["tools"] = tools
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    }
-
-    # Accumulate full SSE response for proper tool_calls parsing
-    sse_parts: list[str] = []
-
-    try:
-        with httpx.stream("POST", api_url, json=body, headers=headers, timeout=60.0) as resp:
-            if resp.status_code != 200:
-                raise RuntimeError(f"API request failed: HTTP {resp.status_code}: {resp.text[:200]}")
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                sse_parts.append(line)
-                if not line.startswith("data:"):
-                    continue
-                try:
-                    event = json.loads(line[5:])
-                except json.JSONDecodeError:
-                    continue
-                event_type = event.get("type")
-                if event_type == "content_block_delta":
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text = delta.get("text", "")
-                        if text:
-                            yield BackendChunk(type="text_delta", text=text)
-                elif event_type == "message_stop":
-                    msg = event.get("message", {})
-                    stop_reason = msg.get("stop_reason") or "end_turn"
-                    yield BackendChunk(type="stop_reason", stop_reason=stop_reason)
-                elif event.get("object") == "chat.completion.chunk":
-                    # OpenAI Chat Completions streaming: emit text live so
-                    # callers can render incremental output.
-                    choices = event.get("choices") or []
-                    if choices:
-                        delta = choices[0].get("delta") or {}
-                        content = delta.get("content")
-                        if isinstance(content, str) and content:
-                            yield BackendChunk(type="text_delta", text=content)
-                        finish_reason = choices[0].get("finish_reason")
-                        if finish_reason:
-                            yield BackendChunk(
-                                type="stop_reason",
-                                stop_reason="end_turn" if finish_reason == "stop" else finish_reason,
-                            )
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"API request failed: {exc}") from exc
-
-    # Parse the accumulated SSE to extract tool_calls
-    if sse_parts:
-        sse_text = "\n".join(sse_parts)
-        _, stop_reason, tool_calls = _parse_sse_stream_with_tools(sse_text)
-        if tool_calls:
-            yield BackendChunk(type="tool_calls", text=json.dumps([asdict(tc) for tc in tool_calls]))
+    for line in sse_text.split("\n"):
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:])
+        except json.JSONDecodeError:
+            continue
+        if event.get("object") != "chat.completion.chunk":
+            continue
+        choices = event.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                yield BackendChunk(type="text_delta", text=content)
+            finish_reason = choices[0].get("finish_reason")
+            if finish_reason:
+                yield BackendChunk(
+                    type="stop_reason",
+                    stop_reason="end_turn" if finish_reason == "stop" else finish_reason,
+                )
+    if parsed.tool_calls:
+        yield BackendChunk(type="tool_calls", text=json.dumps([asdict(tc) for tc in parsed.tool_calls]))
+    if parsed.reasoning_text:
+        yield BackendChunk(type="reasoning", text=parsed.reasoning_text)
+    if parsed.usage:
+        yield BackendChunk(type="usage", text=json.dumps(parsed.usage))
 
 
 class AnthropicQueryBackend:

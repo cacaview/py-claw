@@ -91,6 +91,9 @@ def _build_state(args: argparse.Namespace) -> RuntimeState:
                     api_url=cfg.api.api_url,
                     model=cfg.api.model,
                     tools=tools,
+                    temperature=cfg.api.temperature,
+                    top_p=cfg.api.top_p,
+                    timeout_seconds=cfg.api.timeout_seconds,
                 )
     return state
 
