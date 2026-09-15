@@ -56,7 +56,7 @@
 | `DiscoverSkills` | `discover_skills_tool.py` | 技能发现 |
 | `GetSkillDetails` | `discover_skills_tool.py` | 获取技能详情 |
 | `WebFetch` | `web_fetch_tool.py` | Web 内容抓取 |
-| `WebSearch` | `web_search_tool.py` | Web 搜索 |
+| `WebSearch` | `web_search_tool.py` + `web_search_backends.py` | 多引擎联网搜索（Bing/DuckDuckGo/Baidu，免 API key） |
 | `Config` | `config_tool.py` | 配置操作 |
 | `ConfigSet` | `config_tool.py` | 设置配置项 |
 | `ConfigList` | `config_tool.py` | 列出配置项 |
@@ -115,12 +115,21 @@ REPL 模式下以下工具被过滤（通过 REPL 批量操作）：
 ### REPL 模式是什么？
 REPL 模式默认开启（interactive CLI），此时 `Read/Write/Edit/Glob/Grep/Bash/NotebookEdit/Agent` 工具对模型不可见，模型需通过 REPL 做批量操作。可通过 `CLAUDE_CODE_REPL=0` 禁用。
 
+### WebSearch 是怎么实现的？
+`web_search_backends.py` 提供免 API key 的多引擎联网搜索，设计参考 open-webSearch MCP server（Aas-ee/open-webSearch）：
+- 引擎：`bing`（默认首选）、`duckduckgo`（预加载 d.js feed 优先、HTML 端点兜底）、`baidu`（带 hao123 `tn` 客户端参数避开验证码；`/link` 跳转链接会解析为真实 URL，无法解析的包装链接被丢弃）
+- `engine="auto"`（默认）按 `AUTO_ENGINE_ORDER` 顺序降级，单个引擎失败记入 `failures` 而不中断整体
+- 输入支持 `engine`（含 `DDG`/`Microsoft`/`百度` 等别名）、`max_results`（1-20）、`allowed_domains`/`blocked_domains` 域过滤
+- 全程标准库实现（urllib + html.parser），网络层统一走模块级 `_http_get`，测试通过 monkeypatch 该接缝或传入 `fetch` 参数实现离线
+- 所有引擎都失败时不抛异常，而是返回带 `error`/`details`/`hint` 的结构化空结果，让模型自行决策（换词/换引擎/WebFetch 兜底）
+
 ### 当前有哪些已确认限制？
 - `Read.pages` 目前直接报错，PDF 分页尚未实现
 - `Grep` 是 Python 正则搜索，不是 ripgrep 兼容实现
 - `Grep.type` 字段当前会通过 schema 接受，但执行路径并未真正按文件类型过滤
 - `Bash.dangerouslyDisableSandbox` 字段当前会通过 schema 接受，但本实现未实际接入 sandbox
 - `LSP` 工具依赖 LSP server 配置，未配置时返回错误
+- `WebSearch` 依赖各搜索引擎公开端点的 HTML 结构，引擎改版或反爬策略变化时对应解析器需要跟随更新
 
 ## 相关文件清单
 
@@ -139,12 +148,14 @@ REPL 模式默认开启（interactive CLI），此时 `Read/Write/Edit/Glob/Grep
 - `skill_tool.py`
 - `web_fetch_tool.py`
 - `web_search_tool.py`
+- `web_search_backends.py`
 - `config_tool.py`
 - `base.py`
 - `__init__.py`
 
 ## 变更记录 (Changelog)
 
+- 2026-09-15：`WebSearch` 从空壳 stub 升级为真实多引擎联网搜索——新增 `web_search_backends.py`（Bing/DuckDuckGo/Baidu，免 API key，auto 降级 + 部分失败上报 + 域过滤，参考 open-webSearch MCP 设计）；输入新增 `engine`/`max_results`；新增 `tests/test_web_search_backends.py`、`tests/test_web_search_tool.py`（55 个测试），`tests/test_tools_runtime.py` 中 4 个 WebSearch 测试改为离线 patch
 - 2026-04-13：新增 BashTool AST FAQ 说明（tools/bash/ 子模块：ast.py、parser.py、security.py）
 - 2026-04-12：更新工具清单，纳入 LSPTool、PowerShellTool、AgentTool teammate、SkillTool inline/fork 等新增工具。
 - 2026-04-08：补全文档，修正"仅权限目标映射"的过时结论，确认内置工具真实执行路径。

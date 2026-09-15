@@ -673,7 +673,25 @@ def test_tool_runtime_execute_web_fetch_raises_permission_error_when_denied(tmp_
 
 
 
-def test_tool_runtime_execute_web_search_returns_honest_degraded_result(tmp_path) -> None:
+def test_tool_runtime_execute_web_search_returns_honest_degraded_result(tmp_path, monkeypatch) -> None:
+    """When every engine fails the tool reports the failures instead of raising."""
+    import py_claw.tools.web_search_backends as backends
+
+    def fake_execute_search(query, *, engine, max_results, fetch=None):
+        return {
+            "query": query,
+            "engine": "",
+            "engines": ["bing", "duckduckgo", "baidu"],
+            "totalResults": 0,
+            "results": [],
+            "failures": [
+                {"engine": "bing", "error": "blocked"},
+                {"engine": "duckduckgo", "error": "offline"},
+                {"engine": "baidu", "error": "blocked"},
+            ],
+        }
+
+    monkeypatch.setattr(backends, "execute_search", fake_execute_search)
     result = ToolRuntime().execute(
         "WebSearch",
         {"query": "Claude Code", "allowed_domains": ["docs.anthropic.com"]},
@@ -684,9 +702,10 @@ def test_tool_runtime_execute_web_search_returns_honest_degraded_result(tmp_path
     assert result.permission_target.content == "query:Claude Code | allow:docs.anthropic.com"
     assert result.output["query"] == "Claude Code"
     assert isinstance(result.output["durationSeconds"], float)
-    assert result.output["results"] == [
-        "WebSearch is not yet connected to a live search backend in py-claw.\n\nQuery: \"Claude Code\"\nAllowed domains: docs.anthropic.com\n\nTo enable web search, configure a search backend in settings or connect to a search provider.\nThe query was not executed against any live search service."
-    ]
+    assert result.output["results"] == []
+    assert result.output["totalResults"] == 0
+    assert "No web search results" in result.output["error"]
+    assert "bing: blocked" in result.output["details"]
 
 
 
@@ -704,7 +723,35 @@ def test_tool_runtime_execute_web_search_rejects_conflicting_domain_filters(tmp_
 
 
 
-def test_tool_runtime_execute_web_search_normalizes_blocked_domains(tmp_path) -> None:
+def test_tool_runtime_execute_web_search_normalizes_blocked_domains(tmp_path, monkeypatch) -> None:
+    import py_claw.tools.web_search_backends as backends
+
+    def fake_execute_search(query, *, engine, max_results, fetch=None):
+        return {
+            "query": query,
+            "engine": "bing",
+            "engines": ["bing"],
+            "totalResults": 2,
+            "results": [
+                {
+                    "title": "Blocked",
+                    "url": "https://example.com/page",
+                    "description": "",
+                    "source": "example.com",
+                    "engine": "bing",
+                },
+                {
+                    "title": "Kept",
+                    "url": "https://docs.anthropic.com/en",
+                    "description": "",
+                    "source": "docs.anthropic.com",
+                    "engine": "bing",
+                },
+            ],
+            "failures": [],
+        }
+
+    monkeypatch.setattr(backends, "execute_search", fake_execute_search)
     result = ToolRuntime().execute(
         "WebSearch",
         {"query": "Claude Code", "blocked_domains": [" example.com ", "", "docs.anthropic.com "]},
@@ -712,9 +759,9 @@ def test_tool_runtime_execute_web_search_normalizes_blocked_domains(tmp_path) ->
     )
 
     assert result.permission_target.content == "query:Claude Code | block:example.com,docs.anthropic.com"
-    assert result.output["results"] == [
-        "WebSearch is not yet connected to a live search backend in py-claw.\n\nQuery: \"Claude Code\"\nBlocked domains: example.com, docs.anthropic.com\n\nTo enable web search, configure a search backend in settings or connect to a search provider.\nThe query was not executed against any live search service."
-    ]
+    # both result domains are blocked, so nothing survives the filter
+    assert result.output["results"] == []
+    assert result.output["totalResults"] == 0
 
 
 
@@ -728,7 +775,28 @@ def test_tool_runtime_execute_web_search_rejects_short_query(tmp_path) -> None:
 
 
 
-def test_tool_runtime_execute_web_search_respects_permission_engine(tmp_path) -> None:
+def test_tool_runtime_execute_web_search_respects_permission_engine(tmp_path, monkeypatch) -> None:
+    import py_claw.tools.web_search_backends as backends
+
+    def fake_execute_search(query, *, engine, max_results, fetch=None):
+        return {
+            "query": query,
+            "engine": "bing",
+            "engines": ["bing"],
+            "totalResults": 1,
+            "results": [
+                {
+                    "title": "Docs",
+                    "url": "https://docs.anthropic.com/en",
+                    "description": "",
+                    "source": "docs.anthropic.com",
+                    "engine": "bing",
+                },
+            ],
+            "failures": [],
+        }
+
+    monkeypatch.setattr(backends, "execute_search", fake_execute_search)
     engine = PermissionEngine.from_settings(
         _settings_with_permissions(allow=["WebSearch(query:Claude Code | allow:docs.anthropic.com)"]),
         mode="default",
@@ -742,6 +810,7 @@ def test_tool_runtime_execute_web_search_respects_permission_engine(tmp_path) ->
     )
 
     assert result.output["query"] == "Claude Code"
+    assert result.output["results"][0]["url"] == "https://docs.anthropic.com/en"
 
 
 
