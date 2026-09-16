@@ -141,6 +141,7 @@ class ReadTool:
 
     def execute(self, arguments: ReadToolInput, *, cwd: str) -> dict[str, object]:
         path = _require_absolute_file(arguments.file_path)
+        _check_within_root(path)
         if arguments.pages is not None:
             return {
                 "type": "text",
@@ -179,6 +180,7 @@ class EditTool:
 
     def execute(self, arguments: EditToolInput, *, cwd: str) -> dict[str, object]:
         path = _require_absolute_file(arguments.file_path)
+        _check_within_root(path)
         if arguments.old_string == arguments.new_string:
             raise ToolError("No changes to make: old_string and new_string are exactly the same.")
         text = _read_text(path)
@@ -209,6 +211,7 @@ class WriteTool:
         path = Path(arguments.file_path)
         if not path.is_absolute():
             raise ToolError("file_path must be absolute")
+        _check_within_root(path)
         if not path.parent.exists():
             raise ToolError("Parent directory does not exist")
         original = _read_text(path) if path.exists() else None
@@ -236,8 +239,12 @@ class GlobTool:
             raise ToolError(f"Path does not exist: {base_path}")
         if not base_path.is_dir():
             raise ToolError(f"Path is not a directory: {base_path}")
+        _check_within_root(base_path)
         pattern = str(base_path / arguments.pattern)
         matches = [Path(match) for match in glob_module.glob(pattern, recursive=True) if Path(match).is_file()]
+        # Containment (layer 3): a glob pattern may still reach outside the
+        # root via ``..`` components — drop anything that resolves outside.
+        matches = [match for match in matches if _within_root(match)]
         matches.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
         filenames = [str(match) for match in matches]
         return {
@@ -260,7 +267,11 @@ class GrepTool:
         search_root = Path(arguments.path or cwd)
         if not search_root.exists():
             raise ToolError(f"Path does not exist: {search_root}")
+        _check_within_root(search_root)
         files = _grep_candidate_files(search_root, arguments.glob, arguments.type)
+        # Containment (layer 3): drop candidates that resolve outside the
+        # root (e.g. symlinked files pointing out of it).
+        files = [file for file in files if _within_root(file)]
         flags = re.MULTILINE
         if arguments.ignore_case:
             flags |= re.IGNORECASE
@@ -344,6 +355,7 @@ class NotebookEditTool:
 
     def execute(self, arguments: NotebookEditToolInput, *, cwd: str) -> dict[str, object]:
         path = _require_absolute_path(arguments.notebook_path)
+        _check_within_root(path)
         if path.suffix != ".ipynb":
             raise ToolError("notebook_path must point to a .ipynb file")
         if not path.exists():
@@ -406,6 +418,43 @@ def _require_absolute_path(file_path: str) -> Path:
     if not path.is_absolute():
         raise ToolError("file_path must be absolute")
     return path
+
+
+def _fs_root() -> Path | None:
+    """Return the resolved ``PYCLAW_FS_ROOT`` containment root, or ``None``.
+
+    When the environment variable is set (non-empty), every local FS
+    operation is confined to this directory: a resolved target — an
+    absolute path outside it, a ``..`` traversal, or a symlink pointing
+    out of it — is refused (fail closed). When unset or empty there is no
+    containment and behaviour is unchanged, so this is a no-op for any
+    deployment that does not opt in (e.g. the interactive TUI). The
+    Resident Agency sets it to each action's sandbox (ADR-0019, layer 3).
+    """
+    raw = os.environ.get("PYCLAW_FS_ROOT", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+def _check_within_root(path: Path) -> None:
+    """Raise :class:`ToolError` if ``path`` resolves outside the FS root.
+
+    A no-op when ``PYCLAW_FS_ROOT`` is unset. The comparison uses the
+    fully-resolved path, so symlinks and ``..`` components cannot smuggle
+    a target across the boundary.
+    """
+    root = _fs_root()
+    if root is None:
+        return
+    if not path.resolve().is_relative_to(root):
+        raise ToolError(f"path is outside the allowed root (PYCLAW_FS_ROOT): {path}")
+
+
+def _within_root(path: Path) -> bool:
+    """True when containment is off, or ``path`` resolves inside the root."""
+    root = _fs_root()
+    return root is None or path.resolve().is_relative_to(root)
 
 
 def _read_text(path: Path) -> str:
