@@ -21,6 +21,18 @@ async def type_text(pilot, text: str) -> None:
         await pilot.press(key)
 
 
+@pytest.fixture(autouse=True)
+def vim_home(tmp_path, monkeypatch):
+    """Point Path.home()-based storage (e.g. ~/.claude/vim.json) at a temp dir.
+
+    REPLScreen seeds its vim state from the persisted vim config on mount.
+    Without this, TUI tests would read the developer's real ~/.claude/vim.json
+    and — if vim is enabled there — hijack every keystroke in the suite.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
 def apply_compact_layout(app, size: tuple[int, int]) -> None:
     """Apply the same responsive layout state as PyClawApp for tests."""
     width, height = size
@@ -84,7 +96,7 @@ def mock_runtime_state(command_items, suggestion_engine):
 
 
 @pytest_asyncio.fixture
-async def app(mock_runtime_state, suggestion_engine, command_items):
+async def app(vim_home, mock_runtime_state, suggestion_engine, command_items):
     """Create a PyClawApp instance for testing."""
     from textual.app import App, ComposeResult
     from py_claw.ui.screens.repl import REPLScreen

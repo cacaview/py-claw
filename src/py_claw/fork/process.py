@@ -53,6 +53,10 @@ class ForkedAgentProcess:
     parent_transcript: list[dict[str, Any]] = field(default_factory=list)
     # Isolation context for worktree/resource isolation
     isolation: dict[str, Any] | None = None
+    # Model backend config for the child's real model turns. None (default)
+    # = auto-resolve from the parent's py-claw config at send_init(); an
+    # explicit dict is passed through verbatim (used by tests).
+    model_config: dict[str, Any] | None = None
 
     _process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(default=None, init=False, repr=False)
@@ -110,6 +114,16 @@ class ForkedAgentProcess:
 
     def send_init(self) -> None:
         """Send init message to child."""
+        from py_claw.fork.model_config import resolve_fork_model_config
+
+        # Default: mirror the parent's configured model backend so the child
+        # can run real turns on the same protocol (OpenAI-compatible or
+        # Anthropic). An explicit model_config attribute wins over auto-resolve.
+        model_config = (
+            self.model_config
+            if self.model_config is not None
+            else resolve_fork_model_config()
+        )
         msg = ForkInitMessage(
             session_id=self.session_id,
             system_prompt=self.system_prompt,
@@ -118,6 +132,7 @@ class ForkedAgentProcess:
             cwd=self.cwd,
             mcp_servers=self.mcp_servers,
             isolation=self.isolation,
+            model_config=model_config,
         )
         self._send(msg)
 

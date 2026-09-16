@@ -222,9 +222,8 @@ class TaskRuntime:
                 )
                 process.spawn()
                 process.send_init()
-                process.send_turn(initial_prompt, turn_count=0)
 
-                # Wait for initial turn result
+                # Wait for initial turn result (send_turn_sync sends the turn itself)
                 try:
                     result = process.send_turn_sync(initial_prompt, turn_count=0, timeout=120.0)
                     exchange.assistant_text = result.get("assistant_text", assistant_text)

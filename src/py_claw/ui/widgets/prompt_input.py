@@ -19,7 +19,9 @@ from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
 from rich.text import Text
+from textual.actions import SkipAction
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.reactive import reactive
@@ -59,6 +61,26 @@ class CommandSuggester(Suggester):
             # Return full completed value for inline display
             return value + suffix
         return None
+
+
+class _PromptTextInput(Input):
+    """Inner input that yields i/a/v to the parent's vim key dispatch.
+
+    Textual strips ancestor key bindings for keys the focused widget
+    "consumes" (``Screen._binding_chain`` consulting ``check_consume_key``),
+    which would block PromptInput's priority vim bindings for printable
+    characters. While the parent is in vim NORMAL mode, i/a/v are *not*
+    consumed here — the parent's ``action_vim_key`` claims them. In every
+    other state (vim off, INSERT/VISUAL sub-modes) the stock Input behavior
+    is preserved exactly.
+    """
+
+    def check_consume_key(self, key: str, character: str | None) -> bool:  # type: ignore[override]
+        if character in ("i", "a", "v"):
+            parent = self.parent
+            if isinstance(parent, PromptInput) and parent.vim_mode == VimMode.NORMAL:
+                return False
+        return super().check_consume_key(key, character)
 
 
 class PromptMode(str, Enum):
@@ -131,6 +153,18 @@ class PromptInput(Vertical):
         color: $text-muted;
     }
     """
+
+    # Minimal vim key set. These must be *priority* bindings: Textual's Input
+    # consumes printable characters (i/a/v) in its own key handler before any
+    # parent on_key handler can see them, so the claim has to happen before
+    # the key is forwarded to the Input. action_vim_key raises SkipAction
+    # unless the prompt is in vim NORMAL mode, in which case the key falls
+    # through to the Input and types exactly as it does with vim disabled.
+    BINDINGS = [
+        Binding("i", 'vim_key("i")', "Vim: enter insert mode", show=False, priority=True),
+        Binding("a", 'vim_key("a")', "Vim: enter insert mode (append)", show=False, priority=True),
+        Binding("v", 'vim_key("v")', "Vim: enter visual mode", show=False, priority=True),
+    ]
 
     # ── reactive state ──────────────────────────────────────────────────────
     prompt_mode: reactive[PromptMode] = reactive(PromptMode.NORMAL)
@@ -242,7 +276,7 @@ class PromptInput(Vertical):
     def compose(self) -> ComposeResult:
         suggester = CommandSuggester(self._engine) if self._engine else None
         yield Static(self._mode_bar_text(), id="pi-mode-bar")
-        yield Input(placeholder=self._placeholder, id="pi-input", suggester=suggester)
+        yield _PromptTextInput(placeholder=self._placeholder, id="pi-input", suggester=suggester)
         yield Static(self.hint, id="pi-hint")
 
     # ── mode bar ────────────────────────────────────────────────────────────
@@ -525,6 +559,38 @@ class PromptInput(Vertical):
             index = 0
         self.prompt_mode = order[(index + 1) % len(order)]
         self.post_message(self.PromptModeChanged(self.prompt_mode))
+
+    def action_vim_key(self, key: str) -> None:
+        """Claim i/a/v while in vim NORMAL mode; decline otherwise.
+
+        Minimal vim key set for the single-line prompt (no h/j/k/l, x, ...):
+        - i: enter insert mode — typing resumes at the cursor
+        - a: enter insert mode after moving the cursor one position right
+          (append), when the cursor is not already at the end of the line
+        - v: enter visual mode (a state indicator for this minimal key set;
+          Escape returns to normal mode)
+
+        When vim is disabled (``vim_mode`` is None) or the prompt is in the
+        INSERT/VISUAL sub-modes, this raises ``SkipAction`` so the key falls
+        through to the inner Input and behaves exactly like plain typing.
+        """
+        if self.vim_mode != VimMode.NORMAL:
+            raise SkipAction
+        if key == "i":
+            self.vim_mode = VimMode.INSERT
+            self.post_message(self.VimModeChanged(VimMode.INSERT))
+        elif key == "a":
+            try:
+                inp = self.get_widget_by_id("pi-input")
+                if isinstance(inp, Input) and inp.cursor_position < len(inp.value):
+                    inp.cursor_position += 1
+            except Exception:
+                pass
+            self.vim_mode = VimMode.INSERT
+            self.post_message(self.VimModeChanged(VimMode.INSERT))
+        elif key == "v":
+            self.vim_mode = VimMode.VISUAL
+            self.post_message(self.VimModeChanged(VimMode.VISUAL))
 
     # ── event handlers ──────────────────────────────────────────────────────
 

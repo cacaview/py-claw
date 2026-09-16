@@ -210,9 +210,10 @@ class AgentTool:
                 # Spawn persistent forked subprocess (subprocess handles initial turn)
                 message = (
                     "py-claw launched a persistent forked subagent in an isolated subprocess. "
-                    "The agent executed via the placeholder backend. "
+                    "The agent's turns are executed by real model API calls inside the subprocess "
+                    "(degrades to a clear error message when no API key is configured). "
                     "Teammate routing is now functional. "
-                    "MCP-isolated agent runtimes, transcript recording, and skill preloading are not yet implemented."
+                    "Transcript recording beyond exchanges, and skill preloading, are not yet implemented."
                 )
                 session = state.task_runtime.create_agent_session(
                     agent_name=resolved_type,

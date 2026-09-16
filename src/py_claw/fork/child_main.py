@@ -223,6 +223,49 @@ class _McpRegistry:
         """Return all tools from all registered servers."""
         return list(self._tools.values())
 
+    def anthropic_tool_definitions(self) -> list[dict[str, Any]]:
+        """Return tool definitions in Anthropic Messages API format.
+
+        Tool names are qualified as "server/tool" to match the routing used
+        by model_executor._execute_agent_tool.
+        """
+        defs: list[dict[str, Any]] = []
+        for qualified_name, tool in self._tools.items():
+            if not isinstance(tool, dict) or not tool.get("name"):
+                continue
+            schema = tool.get("inputSchema")
+            if not isinstance(schema, dict):
+                schema = {"type": "object", "properties": {}}
+            defs.append({
+                "name": qualified_name,
+                "description": tool.get("description") or f"MCP tool {qualified_name}",
+                "input_schema": schema,
+            })
+        return defs
+
+    def openai_tool_definitions(self) -> list[dict[str, Any]]:
+        """Return tool definitions in OpenAI chat-completions format.
+
+        Tool names are qualified as "server/tool" to match the routing used
+        by model_executor._execute_agent_tool.
+        """
+        defs: list[dict[str, Any]] = []
+        for qualified_name, tool in self._tools.items():
+            if not isinstance(tool, dict) or not tool.get("name"):
+                continue
+            schema = tool.get("inputSchema")
+            if not isinstance(schema, dict):
+                schema = {"type": "object", "properties": {}}
+            defs.append({
+                "type": "function",
+                "function": {
+                    "name": qualified_name,
+                    "description": tool.get("description") or f"MCP tool {qualified_name}",
+                    "parameters": schema,
+                },
+            })
+        return defs
+
     def close_all(self) -> None:
         """Stop all MCP server subprocesses."""
         for name, server in list(self._servers.items()):
@@ -279,6 +322,9 @@ def _main() -> int:
     cwd = init_msg.get("cwd", ".")
     mcp_configs = init_msg.get("mcp_servers") or []
     isolation_config = init_msg.get("isolation") or {}
+    # Model backend config (protocol + credentials) from the parent's config.
+    # None -> child uses ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL from the env.
+    model_config = init_msg.get("model_config")
 
     # Parse isolation context
     worktree_notice: str | None = None
@@ -341,6 +387,11 @@ def _main() -> int:
                     system_prompt=system_prompt,
                     exchanges=exchanges,
                     worktree_notice=worktree_notice,
+                    model=model,
+                    cwd=cwd,
+                    allowed_tools=allowed_tools,
+                    mcp_registry=mcp_registry,
+                    model_config=model_config,
                 )
 
                 # Accumulate in history
@@ -352,26 +403,6 @@ def _main() -> int:
                 # Echo turn_count back so parent can route result
                 result["turn_count"] = incoming_turn_count
                 _send_result(result)
-            turn_count += 1
-            query_text = msg.get("query_text", "")
-            incoming_turn_count = msg.get("turn_count", turn_count)
-
-            result = _handle_turn_persistent(
-                query_text=query_text,
-                system_prompt=system_prompt,
-                exchanges=exchanges,
-                worktree_notice=worktree_notice,
-            )
-
-            # Accumulate in history
-            exchanges.append({
-                "user_message": query_text,
-                "assistant_text": result.get("assistant_text", ""),
-            })
-
-            # Echo turn_count back so parent can route result
-            result["turn_count"] = incoming_turn_count
-            _send_result(result)
             turn_count += 1
 
         elif msg_type == "mcp_call":
@@ -413,22 +444,86 @@ def _handle_turn_persistent(
     system_prompt: str,
     exchanges: list[dict[str, str]],
     worktree_notice: str | None = None,
+    model: str | None = None,
+    cwd: str = ".",
+    allowed_tools: list[str] | None = None,
+    mcp_registry: _McpRegistry | None = None,
+    model_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Handle a turn with conversation history context."""
-    history_context = _build_history_context(exchanges)
-    enriched_query = (
-        (history_context + "\n\n" if history_context else "")
-        + f"User: {query_text}"
+    """Handle a persistent-mode turn with a real model call.
+
+    Runs the turn through model_executor.run_agent_turn, which dispatches on
+    the parent-provided model_config: OpenAI-compatible chat completions or
+    the Anthropic Messages path (key/URL from config, else environment).
+    Conversation history is sent as proper multi-turn messages; the
+    worktree notice is prepended to the system prompt.
+
+    All failures (no API key, network/API errors, executor errors) degrade
+    to a clear error message instead of crashing or hanging the child.
+    """
+    full_system_prompt = system_prompt or ""
+    if worktree_notice:
+        full_system_prompt = (worktree_notice + "\n\n" + full_system_prompt).strip()
+
+    return _run_agent_turn_sync(
+        query_text=query_text,
+        system_prompt=full_system_prompt,
+        exchanges=exchanges,
+        cwd=cwd,
+        model=model,
+        allowed_tools=allowed_tools,
+        mcp_registry=mcp_registry,
+        model_config=model_config,
     )
 
+
+def _run_agent_turn_sync(
+    query_text: str,
+    system_prompt: str,
+    exchanges: list[dict[str, str]],
+    cwd: str,
+    model: str | None,
+    allowed_tools: list[str] | None,
+    mcp_registry: _McpRegistry | None,
+    model_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the async agent turn synchronously in the subprocess.
+
+    Mirrors the event-loop handling of _handle_turn_speculation. Any
+    unexpected failure (including import errors) degrades to an error result
+    so the child process stays alive for subsequent turns.
+    """
+    import asyncio
+
     try:
-        result = _make_placeholder_result(enriched_query, system_prompt, worktree_notice)
-        return result
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        from py_claw.fork.model_executor import run_agent_turn
+
+        return loop.run_until_complete(
+            run_agent_turn(
+                query_text=query_text,
+                system_prompt=system_prompt,
+                exchanges=exchanges,
+                cwd=cwd,
+                model=model,
+                allowed_tools=allowed_tools,
+                mcp_registry=mcp_registry,
+                model_config=model_config,
+            )
+        )
     except Exception as exc:
+        import sys as _sys
+        _sys.stderr.write(f"[Fork agent] Turn error: {exc}\n")
+        _sys.stderr.flush()
         return {
-            "assistant_text": f"Error: {str(exc)}",
+            "assistant_text": f"[Fork agent] Model turn failed: {exc}. Received query: {query_text[:200]}",
             "stop_reason": "end_turn",
-            "usage": {},
+            "usage": {"backendType": "model_error"},
             "model_usage": {},
             "tool_calls": [],
         }

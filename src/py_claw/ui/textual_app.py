@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from time import time
 from typing import Any
@@ -13,6 +14,9 @@ from py_claw.utils.suggestions.command_suggestions import (
     get_best_command_match,
     is_command_input,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -206,9 +210,11 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
         def on_mount(self) -> None:
             self._pending_permission_dialog = None
             self._pending_prompt_dialog = None
+            self._pending_elicitation_dialog = None
             self._current_worker = None
             state.permission_ask_callback = self._handle_permission_ask
             state.ask_user_callback = self._handle_prompt_ask
+            self._register_elicitation_prompter()
             self._focus_prompt()
             self._update_narrow_mode()
             if prompt:
@@ -390,6 +396,104 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             self._pending_permission_dialog = None
             return result_box[0]
 
+        def _register_elicitation_prompter(self) -> None:
+            """Register the TUI as the UI for MCP server elicitations."""
+            try:
+                from py_claw.services.mcp_auth.elicitation import set_elicitation_ui_prompter
+
+                set_elicitation_ui_prompter(self._handle_elicitation_ask)
+            except Exception:
+                logger.debug("Failed to register elicitation UI prompter", exc_info=True)
+
+        def _handle_elicitation_ask(
+            self,
+            server_name: str,
+            params: dict[str, Any],
+            event: Any,
+            timeout: float | None,
+        ) -> dict[str, Any] | None:
+            """Blocking UI prompter for MCP elicitation requests.
+
+            Runs on a worker thread (ElicitationHandler dispatches it via
+            asyncio.to_thread) while the Textual loop keeps running. Mounts
+            a minimal dialog on the UI thread and blocks until the user
+            answers — the dialog callbacks push the answer back into the
+            shared ElicitationRequestEvent via event.resolve(). The server's
+            'complete' notification (url mode) resolves the same event
+            out-of-band. Returns None if the dialog could not be shown.
+            """
+            from py_claw.ui.dialogs.elicitation import ElicitationDialog
+
+            def resolve_and_close(result: dict[str, Any]) -> None:
+                try:
+                    event.resolve(result)
+                except Exception:
+                    pass
+                try:
+                    self._screen()._unregister_overlay("elicitation-dialog")
+                except Exception:
+                    pass
+                try:
+                    dialog.remove()
+                except Exception:
+                    pass
+
+            dialog = ElicitationDialog(
+                server_name=server_name,
+                message=str(params.get("message") or ""),
+                mode=str(params.get("mode") or "form"),
+                url=params.get("url") if isinstance(params.get("url"), str) else None,
+                requested_schema=params.get("requestedSchema")
+                if isinstance(params.get("requestedSchema"), dict)
+                else None,
+                on_accept=lambda content: resolve_and_close(
+                    {"action": "accept", "content": content}
+                ),
+                on_decline=lambda: resolve_and_close({"action": "decline"}),
+                on_cancel=lambda: resolve_and_close({"action": "cancel"}),
+                id="overlay-elicitation",
+            )
+            self._pending_elicitation_dialog = dialog
+
+            def mount_dialog() -> None:
+                self._screen()._register_overlay("elicitation-dialog")
+                self._screen().mount(dialog)
+                try:
+                    dialog.query_one("#btn-confirm").focus()
+                except Exception:
+                    dialog.focus()
+
+            try:
+                self.call_from_thread(mount_dialog)
+            except RuntimeError:
+                # App is stopped/stopping: cannot present the dialog. The
+                # handler degrades to a cancel so the MCP call never hangs.
+                self._pending_elicitation_dialog = None
+                return None
+
+            result = event.wait_for_result(timeout)
+            self._pending_elicitation_dialog = None
+            if result is not None:
+                # The answer may have arrived out-of-band (e.g. the server's
+                # 'complete' notification) without the dialog's own buttons
+                # closing it — make sure the dialog is gone either way.
+                def close_if_mounted() -> None:
+                    try:
+                        self._screen()._unregister_overlay("elicitation-dialog")
+                    except Exception:
+                        pass
+                    try:
+                        if dialog.is_mounted:
+                            dialog.remove()
+                    except Exception:
+                        pass
+
+                try:
+                    self.call_from_thread(close_if_mounted)
+                except RuntimeError:
+                    pass
+            return result
+
         def _handle_input_change(self, text: str) -> None:
             self._set_hint(_format_prompt_hint(text, engine))
             if text.strip():
@@ -492,7 +596,11 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
                 self._current_worker = None
             # Unblock any worker thread waiting on a blocking dialog; for
             # permission prompts Esc has always meant "deny".
-            for pending in (getattr(self, "_pending_permission_dialog", None), getattr(self, "_pending_prompt_dialog", None)):
+            for pending in (
+                getattr(self, "_pending_permission_dialog", None),
+                getattr(self, "_pending_prompt_dialog", None),
+                getattr(self, "_pending_elicitation_dialog", None),
+            ):
                 if pending is not None:
                     try:
                         if pending.is_mounted:
@@ -609,4 +717,13 @@ def run_textual_ui(state: RuntimeState, query_runtime: QueryRuntime, *, prompt: 
             self._screen().action_show_tasks_panel()
 
     PyClawApp().run()
+    # Clear the registered UI prompter so any later non-TUI session in this
+    # process degrades elicitations to cancel instead of touching a stopped
+    # Textual app.
+    try:
+        from py_claw.services.mcp_auth.elicitation import set_elicitation_ui_prompter
+
+        set_elicitation_ui_prompter(None)
+    except Exception:
+        pass
     return 0

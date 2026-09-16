@@ -11,6 +11,7 @@ from py_claw.tools.ask_user_question_tool import (
     AskUserQuestionQuestion,
     AskUserQuestionToolInput,
 )
+from py_claw.ui.dialogs.elicitation import ElicitationDialog
 from py_claw.ui.dialogs.permission import PermissionDialog
 from py_claw.ui.dialogs.prompt import PromptDialog
 
@@ -453,3 +454,145 @@ class TestStandaloneDialogs:
             await pilot.pause()
 
         assert denied == [True]
+
+
+class TestElicitationDialog:
+    """Minimal MCP elicitation dialog (P2-3): form + url modes, callbacks."""
+
+    async def test_form_dialog_accept_collects_values(self) -> None:
+        """Accept submits the form values keyed by schema property name."""
+        accepted: list[dict | None] = []
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "title": "Name"},
+                "age": {"type": "number", "title": "Age", "default": "30"},
+            },
+        }
+
+        async with App().run_test() as pilot:
+            dialog = ElicitationDialog(
+                server_name="demo",
+                message="Please tell us about yourself",
+                requested_schema=schema,
+                on_accept=accepted.append,
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            body = str(pilot.app.query_one("#dialog-body").render())
+            assert "Please tell us about yourself" in body
+            assert str(pilot.app.query_one("#field-name-label").render()) == "Name"
+
+            from textual.widgets import Input
+
+            pilot.app.query_one("#field-name", Input).value = "py-claw"
+            await pilot.pause()
+
+            await pilot.click("#btn-confirm")
+            await pilot.pause()
+
+        assert accepted == [{"name": "py-claw", "age": "30"}]
+
+    async def test_form_dialog_accept_omits_empty_values(self) -> None:
+        """An all-empty form carries no content (content is None)."""
+        accepted: list[dict | None] = []
+
+        async with App().run_test() as pilot:
+            dialog = ElicitationDialog(
+                server_name="demo",
+                message="Confirm?",
+                on_accept=accepted.append,
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            await pilot.click("#btn-confirm")
+            await pilot.pause()
+
+        assert accepted == [None]
+
+    async def test_form_dialog_decline_button(self) -> None:
+        """Decline triggers on_decline."""
+        declined: list[bool] = []
+
+        async with App().run_test() as pilot:
+            dialog = ElicitationDialog(
+                server_name="demo",
+                message="Confirm?",
+                on_decline=lambda: declined.append(True),
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            await pilot.click("#btn-deny")
+            await pilot.pause()
+
+        assert declined == [True]
+
+    async def test_form_dialog_escape_cancels(self) -> None:
+        """Escape on a pending elicitation means cancel (unblocks the worker)."""
+        cancelled: list[bool] = []
+
+        async with App().run_test() as pilot:
+            dialog = ElicitationDialog(
+                server_name="demo",
+                message="Confirm?",
+                on_cancel=lambda: cancelled.append(True),
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            dialog.action_cancel()
+            await pilot.pause()
+
+        assert cancelled == [True]
+
+    async def test_url_dialog_completed_button(self) -> None:
+        """Url mode: 'Completed' resolves with accept and no content."""
+        accepted: list[dict | None] = []
+        cancelled: list[bool] = []
+
+        async with App().run_test() as pilot:
+            dialog = ElicitationDialog(
+                server_name="oauth-srv",
+                message="Sign in to continue",
+                mode="url",
+                url="https://auth.example/cb?state=abc",
+                on_accept=accepted.append,
+                on_cancel=lambda: cancelled.append(True),
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            body = str(pilot.app.query_one("#dialog-body").render())
+            assert "Sign in to continue" in body
+            assert "https://auth.example/cb?state=abc" in body
+            assert "field-value" not in str(pilot.app)  # no form inputs in url mode
+
+            await pilot.click("#btn-confirm")
+            await pilot.pause()
+
+        assert accepted == [None]
+        assert cancelled == []
+
+    async def test_url_dialog_cancel_button(self) -> None:
+        """Url mode: Cancel button (and Esc) resolve with cancel."""
+        cancelled: list[bool] = []
+
+        async with App().run_test() as pilot:
+            dialog = ElicitationDialog(
+                server_name="oauth-srv",
+                message="Sign in to continue",
+                mode="url",
+                url="https://auth.example/cb",
+                on_cancel=lambda: cancelled.append(True),
+            )
+            pilot.app.mount(dialog)
+            await pilot.pause()
+
+            await pilot.click("#btn-deny")
+            await pilot.pause()
+
+        assert cancelled == [True]

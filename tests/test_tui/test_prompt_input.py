@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from py_claw.ui.typeahead import Suggestion, SuggestionType
-from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode
+from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode, VimMode
 from .conftest import type_text
 
 pytestmark = pytest.mark.asyncio
@@ -184,3 +184,188 @@ class TestPromptInputOnChange:
         await type_text(pilot, "abc")
         assert len(app._test_change_calls) >= 1
         assert "abc" in app._test_change_calls[-1]
+
+
+class TestPromptInputVimMode:
+    """Vim key dispatch when enabled, and unchanged behavior when disabled.
+
+    Vim is enabled the same way the /vim command enables it: the vim service
+    toggles the persisted config and publishes to the TUI store; REPLScreen
+    follows the store and flips PromptInput.vim_mode.
+    """
+
+    @staticmethod
+    def _prompt(screen):
+        return screen.query_one("#repl-prompt-input", PromptInput)
+
+    # ── regression: vim disabled == plain input (must stay byte-identical) ──
+
+    async def test_vim_off_iav_are_plain_characters(self, pilot, screen):
+        """With vim off, i/a/v insert literally — no key is hijacked."""
+        screen.focus_prompt()
+        await type_text(pilot, "iava")
+        assert screen.get_prompt_value() == "iava"
+        assert self._prompt(screen).vim_mode is None
+
+    async def test_vim_off_escape_interrupts_not_mode_switch(self, pilot, screen, app):
+        """With vim off, Escape interrupts as before (no NORMAL mode)."""
+        screen.focus_prompt()
+        await type_text(pilot, "draft")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app._test_interrupt_calls) == 1
+        assert self._prompt(screen).vim_mode is None
+
+    # ── enabling via the service (what the /vim handler does) ───────────────
+
+    async def test_service_toggle_on_activates_normal_mode(self, pilot, screen):
+        """toggle_vim_mode() activates NORMAL mode in the TUI + store."""
+        from py_claw.state.tui_state import get_global_store
+        from py_claw.services.vim import toggle_vim_mode
+
+        prompt = self._prompt(screen)
+        assert prompt.vim_mode is None
+
+        toggle_vim_mode()
+        await pilot.pause()
+
+        assert prompt.vim_mode == VimMode.NORMAL
+        assert get_global_store().get_state().tui.vim_mode == "NORMAL"
+
+    async def test_service_toggle_off_from_insert_restores_plain_input(self, pilot, screen, app):
+        """Disabling while in INSERT restores plain input (the 'OFF' path)."""
+        from py_claw.services.vim import toggle_vim_mode
+
+        prompt = self._prompt(screen)
+        screen.focus_prompt()
+        toggle_vim_mode()
+        await pilot.press("i")
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.INSERT
+
+        toggle_vim_mode()  # off
+        await pilot.pause()
+
+        assert prompt.vim_mode is None
+        await type_text(pilot, "xyz")
+        assert screen.get_prompt_value() == "xyz"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app._test_interrupt_calls) == 1
+
+    # ── key dispatch in each sub-mode ────────────────────────────────────────
+
+    async def test_normal_i_enters_insert_and_consumes_key(self, pilot, screen):
+        from py_claw.services.vim import toggle_vim_mode
+
+        prompt = self._prompt(screen)
+        screen.focus_prompt()
+        toggle_vim_mode()
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.NORMAL
+
+        await pilot.press("i")
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.INSERT
+        assert screen.get_prompt_value() == ""  # 'i' consumed, not typed
+        await type_text(pilot, "hello")
+        assert screen.get_prompt_value() == "hello"
+
+    async def test_normal_a_moves_cursor_then_inserts(self, pilot, screen):
+        from py_claw.services.vim import toggle_vim_mode
+
+        prompt = self._prompt(screen)
+        screen.focus_prompt()
+        toggle_vim_mode()
+        await pilot.pause()
+
+        screen.set_prompt_value("hi")
+        inp = screen.query_one("#pi-input")
+        inp.cursor_position = 0
+        await pilot.pause()
+
+        await pilot.press("a")
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.INSERT
+        assert inp.cursor_position == 1
+
+    async def test_normal_v_visual_escape_roundtrip(self, pilot, screen):
+        from py_claw.services.vim import toggle_vim_mode
+
+        prompt = self._prompt(screen)
+        screen.focus_prompt()
+        toggle_vim_mode()
+        await pilot.pause()
+
+        await pilot.press("v")
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.VISUAL
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.NORMAL
+
+    async def test_insert_escape_returns_to_normal_without_interrupt(self, pilot, screen, app):
+        from py_claw.services.vim import toggle_vim_mode
+
+        prompt = self._prompt(screen)
+        screen.focus_prompt()
+        toggle_vim_mode()
+        await pilot.pause()
+        await pilot.press("i")
+        await pilot.pause()
+        await type_text(pilot, "ab")
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.NORMAL
+        assert len(app._test_interrupt_calls) == 0
+        assert screen.get_prompt_value() == "ab"
+
+        # Escape in NORMAL is not an interrupt either.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert prompt.vim_mode == VimMode.NORMAL
+        assert len(app._test_interrupt_calls) == 0
+
+    # ── mount-time seed from persisted config ────────────────────────────────
+
+    async def test_sync_vim_from_service_applies_persisted_mode(self, pilot, screen, vim_home):
+        """The mount-time sync applies a persisted vim config (restart case)."""
+        import json as _json
+
+        (vim_home / ".claude").mkdir(parents=True, exist_ok=True)
+        (vim_home / ".claude" / "vim.json").write_text(
+            _json.dumps({"enabled": True, "current_mode": "normal"}),
+            encoding="utf-8",
+        )
+
+        screen._sync_vim_mode_from_service()
+        await pilot.pause()
+
+        assert self._prompt(screen).vim_mode == VimMode.NORMAL
+        from py_claw.state.tui_state import get_global_store
+
+        assert get_global_store().get_state().tui.vim_mode == "NORMAL"
+
+    async def test_sync_vim_from_service_disabled_clears_mode(self, pilot, screen, vim_home):
+        """The mount-time sync turns vim off when the config is disabled."""
+        import json as _json
+
+        (vim_home / ".claude").mkdir(parents=True, exist_ok=True)
+        (vim_home / ".claude" / "vim.json").write_text(
+            _json.dumps({"enabled": True, "current_mode": "visual"}),
+            encoding="utf-8",
+        )
+        screen._sync_vim_mode_from_service()
+        await pilot.pause()
+        assert self._prompt(screen).vim_mode == VimMode.VISUAL
+
+        # Now the persisted config is disabled (e.g. after /vim off elsewhere).
+        (vim_home / ".claude" / "vim.json").write_text(
+            _json.dumps({"enabled": False, "current_mode": "normal"}),
+            encoding="utf-8",
+        )
+        screen._sync_vim_mode_from_service()
+        await pilot.pause()
+        assert self._prompt(screen).vim_mode is None

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 from dataclasses import dataclass, field
 from itertools import count
+import logging
 from typing import Any, Callable, Iterator
 import json
 import subprocess
@@ -11,6 +14,9 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request  # noqa: F401  (Request construction)
 
 from py_claw.utils.http import open_url as _open_url
+from py_claw.services.mcp_auth.elicitation import ElicitationHandler, get_elicitation_handler
+
+logger = logging.getLogger(__name__)
 
 from pydantic import TypeAdapter
 
@@ -43,6 +49,14 @@ _SCOPE_BY_SETTINGS_SOURCE = {
 
 # MCP protocol version supported
 MCP_PROTOCOL_VERSION = "2024-11-05"
+
+# Server→client JSON-RPC methods this runtime routes inbound (see
+# handle_inbound_message). The MCP protocol standard method for an
+# elicitation request from a server is "elicitation/create"; the legacy
+# bare "elicitation" name used in this codebase's handler docstrings is
+# accepted as an alias.
+MCP_ELICITATION_CREATE_METHOD = "elicitation/create"
+MCP_ELICITATION_METHODS = frozenset({MCP_ELICITATION_CREATE_METHOD, "elicitation"})
 
 
 @dataclass(slots=True)
@@ -504,6 +518,18 @@ class McpRuntime:
     live_states: dict[str, McpLiveServerState] = field(default_factory=dict)
     sdk_message_handler: Callable[[str, Any], Any] | None = None
     _request_ids: Any = field(default_factory=lambda: count(1), repr=False)
+    # Handler for inbound (server→client) elicitation requests. None means
+    # "use the shared global handler" (see the `elicitation` property), so
+    # the UI prompter registered by the TUI applies. Tests may inject their
+    # own ElicitationHandler via the constructor.
+    _elicitation_handler: ElicitationHandler | None = field(default=None, repr=False)
+
+    @property
+    def elicitation(self) -> ElicitationHandler:
+        """The ElicitationHandler used for inbound elicitation requests."""
+        if self._elicitation_handler is None:
+            return get_elicitation_handler()
+        return self._elicitation_handler
 
     def set_servers(self, servers: dict[str, McpServerConfigForProcessTransport]) -> dict[str, object]:
         previous = set(self.runtime_servers)
@@ -694,6 +720,132 @@ class McpRuntime:
             "notifications/cancelled",
             {"requestId": request_id},
             settings,
+        )
+
+    def handle_inbound_message(
+        self,
+        name: str,
+        message: Any,
+        settings: SettingsLoadResult,
+        signal: Any = None,
+    ) -> dict[str, Any] | None:
+        """Handle a server→client JSON-RPC message received on an established connection.
+
+        This is the runtime's inbound dispatch point: an MCP server can issue
+        JSON-RPC requests back to the client over the connection (the MCP
+        protocol's server→client requests, such as elicitations). Inbound
+        messages from any connection/bridge feed are expected to enter here
+        and be dispatched by JSON-RPC ``method``:
+
+        - ``elicitation/create`` (alias ``elicitation``): routed to
+          ElicitationHandler, which runs hooks, prompts the user (when a UI
+          prompter is registered) and sends the JSON-RPC response back to
+          the server through the connection's write mechanism (the respond_fn
+          this runtime hands it).
+        - any other method or notification: ignored, preserving the existing
+          behaviour for everything that is not an elicitation.
+
+        Args:
+            name: Name of the MCP server the message arrived on.
+            message: The inbound JSON-RPC message (dict with "method", and
+                for requests an "id").
+            settings: Settings load result (server resolution).
+            signal: Optional abort signal (object with an ``aborted`` flag).
+                None means "no abort signal"; the handler treats it as
+                not-aborted.
+
+        Returns:
+            The elicitation result dict when an elicitation was handled,
+            otherwise None. Note: when an elicitation was handled the JSON-RPC
+            response has already been written back by the handler (via the
+            respond_fn), so callers must not send it a second time.
+        """
+        if not isinstance(message, dict):
+            raise ValueError("MCP inbound message must be a JSON-RPC object")
+        method = message.get("method")
+        if not isinstance(method, str) or method not in MCP_ELICITATION_METHODS:
+            # Other inbound methods/notifications: not handled here; the
+            # main (client→server) path is completely unaffected.
+            return None
+        return self._handle_inbound_elicitation(name, message, settings, signal)
+
+    def _handle_inbound_elicitation(
+        self,
+        name: str,
+        message: dict[str, Any],
+        settings: SettingsLoadResult,
+        signal: Any,
+    ) -> dict[str, Any]:
+        """Route an inbound elicitation request to the ElicitationHandler.
+
+        Parameter assembly:
+        - server_name: the MCP server name this connection belongs to
+        - request_id: the inbound JSON-RPC ``id`` (correlates the response)
+        - params: the inbound ``params`` object, verbatim
+        - signal: the caller's abort signal (None => not aborted)
+        - respond_fn: writes the JSON-RPC response back to the server via the
+          connection's existing write mechanism (see _send_elicitation_response)
+
+        Responsibility boundary: ElicitationHandler calls respond_fn itself on
+        every completion path (hook answer, abort, no-UI cancel, UI answer)
+        and then returns the same result. This method therefore must NOT send
+        the response again after the handler returns — doing so would
+        double-send it to the server.
+        """
+        config, _scope = self._require_server(name, settings)
+        if name in self.disabled_servers:
+            raise ValueError(f"Server is disabled: {name}")
+        request_id = message.get("id")
+        params = message.get("params")
+        if not isinstance(params, dict):
+            params = {}
+
+        def respond_fn(result: dict[str, Any]) -> None:
+            self._send_elicitation_response(name, config, request_id, result)
+
+        return _run_coroutine(
+            self.elicitation.handle_elicitation_request(
+                name, request_id, params, signal, respond_fn
+            )
+        )
+
+    def _send_elicitation_response(
+        self,
+        name: str,
+        config: McpServerConfigForProcessTransport,
+        request_id: Any,
+        result: dict[str, Any],
+    ) -> None:
+        """Write the elicitation's JSON-RPC response back to the server.
+
+        This is the respond_fn body handed to the ElicitationHandler, and it
+        reuses the runtime's existing write mechanism:
+
+        - SDK and claudeai-proxy servers communicate through the persistent
+          sdk_message_handler bridge, so the response is written back over
+          that bridge (exactly how outbound SDK messages are sent).
+        - All other transports in this runtime are request/response only
+          (one-shot HTTP/SSE/WebSocket/stdio); they hold no persistent
+          connection that a server-initiated message could arrive on, so
+          there is no channel to write the response to. The elicitation
+          result is still returned from handle_inbound_message, so a bridge
+          that owns a real persistent connection can send it itself.
+        """
+        if request_id is None:
+            # No JSON-RPC id to correlate the response with.
+            return
+        response = {"jsonrpc": "2.0", "id": request_id, "result": result}
+        if isinstance(config, McpSdkServerConfig):
+            if self.sdk_message_handler is not None:
+                self.sdk_message_handler(config.name, response)
+            return
+        if isinstance(config, McpClaudeAIProxyServerConfig):
+            if self.sdk_message_handler is not None:
+                self.sdk_message_handler(config.id, response)
+            return
+        logger.debug(
+            "No persistent channel for MCP server %s; elicitation response not written by runtime",
+            name,
         )
 
     def _dispatch_message(self, config: McpServerConfigForProcessTransport, message: Any) -> Any:
@@ -1173,6 +1325,26 @@ class McpRuntime:
                     continue
             state.tools = normalized_tools
 
+
+
+def _run_coroutine(coro: Any) -> Any:
+    """Run an async handler to completion from the runtime's sync code.
+
+    The MCP transports in this runtime are synchronous, but the
+    ElicitationHandler API is async. If the current thread has no running
+    event loop we use asyncio.run(); if it does (e.g. the inbound feed is
+    driven from an async bridge) we run the coroutine on a dedicated worker
+    thread with its own loop so the running loop is never blocked. The
+    handler's UI prompter already blocks its own thread (it is dispatched via
+    asyncio.to_thread and talks to the TUI through call_from_thread), so it
+    works correctly from either arrangement.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 def _send_http_message(config: McpHttpServerConfig, message: Any) -> Any:

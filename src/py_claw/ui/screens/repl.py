@@ -31,12 +31,28 @@ from py_claw.services.keybindings import (
     get_status_shortcuts_hint,
 )
 from py_claw.ui.typeahead import CommandItem
-from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode
+from py_claw.ui.widgets.prompt_input import PromptInput, PromptMode, VimMode
 from py_claw.ui.widgets.prompt_footer import PromptFooter
 from py_claw.ui.widgets.status_line import StatusLine
 from py_claw.ui.widgets.messages import MessageList, MessageItem, MessageRole
 
 logger = logging.getLogger(__name__)
+
+
+# ── Vim mode sync (TUI store -> PromptInput) ──────────────────────────────────
+#
+# The global TUI store carries the live vim mode as a string published by the
+# vim service (py_claw.services.vim): "OFF" while vim is disabled, or the
+# uppercase sub-mode ("INSERT" / "NORMAL" / "VISUAL" / "COMMAND") while
+# enabled. PromptInput.vim_mode is None when vim is off.
+_TUI_VIM_MODE_TO_PROMPT: dict[str, "VimMode | None"] = {
+    "OFF": None,
+    "INSERT": VimMode.INSERT,
+    "NORMAL": VimMode.NORMAL,
+    "VISUAL": VimMode.VISUAL,
+    # The widget has no dedicated command mode; treat it like normal.
+    "COMMAND": VimMode.NORMAL,
+}
 
 
 def _default_model_label() -> str:
@@ -107,6 +123,9 @@ class REPLScreen(Vertical):
         self._is_loading = False
         self._current_mode = "normal"
         self._compact_mode = "full"
+        # Vim mode sync state (see on_mount / _on_tui_vim_store_change)
+        self._last_seen_tui_vim: str | None = None
+        self._unsubscribe_tui_state: Callable[[], None] | None = None
         # Overlay tracking
         self._active_overlay: str | None = None
         self._overlay_ids: set[str] = set()
@@ -319,6 +338,100 @@ class REPLScreen(Vertical):
             update_tui_vim_mode(event.mode.value)
         except Exception:
             pass
+
+    # ── vim mode lifecycle (store -> prompt) ─────────────────────────────────
+
+    def on_mount(self) -> None:
+        """Seed the vim state and follow live vim-mode changes from the store."""
+        # Apply the persisted vim mode (vim service config) to the prompt
+        # input, then follow live changes (e.g. the /vim command publishing
+        # to the TUI store from its worker thread).
+        try:
+            self._sync_vim_mode_from_service()
+        except Exception:
+            logger.debug("REPLScreen: initial vim mode sync failed", exc_info=True)
+        self._unsubscribe_tui_state = None
+        try:
+            from py_claw.state.store import get_global_store
+
+            store = get_global_store()
+            self._last_seen_tui_vim = store.get_state().tui.vim_mode
+            self._unsubscribe_tui_state = store.subscribe(self._on_tui_vim_store_change)
+        except Exception:
+            logger.debug("REPLScreen: TUI store subscription failed", exc_info=True)
+
+    def on_unmount(self) -> None:
+        """Release the TUI store subscription."""
+        if self._unsubscribe_tui_state is not None:
+            try:
+                self._unsubscribe_tui_state()
+            except Exception:
+                pass
+            self._unsubscribe_tui_state = None
+
+    def _sync_vim_mode_from_service(self) -> None:
+        """Apply the persisted vim mode (vim service) to prompt + TUI store."""
+        from py_claw.services.vim import load_vim_config
+
+        config = load_vim_config()
+        if config.enabled:
+            target = _TUI_VIM_MODE_TO_PROMPT.get(config.current_mode.value.upper(), VimMode.NORMAL)
+            store_value = config.current_mode.value.upper()
+        else:
+            target = None
+            store_value = "OFF"
+        prompt = self.query_one("#repl-prompt-input", PromptInput)
+        if prompt.vim_mode != target:
+            prompt.vim_mode = target
+        # Normalize the store: it defaults to "INSERT" at process start, which
+        # is ambiguous for "vim off", so publish the real persisted state.
+        try:
+            from py_claw.state.tui_state import update_tui_vim_mode
+
+            update_tui_vim_mode(store_value)
+        except Exception:
+            pass
+
+    def _on_tui_vim_store_change(self) -> None:
+        """React to vim-mode changes published to the TUI store.
+
+        Runs on whatever thread called store.update() — a worker thread when
+        the /vim command handler toggles the mode, the app thread for
+        widget-driven updates — so the widget mutation is marshaled with
+        call_from_thread (falling back to a direct call when we are already
+        on the app thread).
+        """
+        try:
+            from py_claw.state.store import get_global_store
+
+            store_vim = get_global_store().get_state().tui.vim_mode
+        except Exception:
+            return
+        if store_vim == self._last_seen_tui_vim:
+            # Not a vim-related change (e.g. keystroke-driven store updates).
+            return
+        self._last_seen_tui_vim = store_vim
+        if not self.is_mounted or self.app is None:
+            return
+        target = _TUI_VIM_MODE_TO_PROMPT.get(store_vim)  # unknown value -> None (vim off)
+        try:
+            self.app.call_from_thread(self._apply_vim_mode, target)
+        except RuntimeError:
+            # call_from_thread forbids the app's own thread (or a stopped
+            # app): apply directly.
+            try:
+                self._apply_vim_mode(target)
+            except Exception:
+                logger.debug("REPLScreen: failed to apply vim mode", exc_info=True)
+
+    def _apply_vim_mode(self, target: "VimMode | None") -> None:
+        """Set the prompt input's vim mode (app thread only)."""
+        try:
+            prompt = self.query_one("#repl-prompt-input", PromptInput)
+        except Exception:
+            return
+        if prompt.vim_mode != target:
+            prompt.vim_mode = target
 
     def on_prompt_input_suggestions_changed(self, event: PromptInput.SuggestionsChanged) -> None:
         """Sync prompt input suggestion payload into the footer."""

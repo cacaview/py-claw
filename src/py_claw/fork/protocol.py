@@ -31,6 +31,11 @@ class ForkInitMessage(ForkMessage):
     mcp_servers: list[dict[str, Any]] | None = None
     # Isolation context
     isolation: dict[str, Any] | None = None  # ForkIsolationContext serialized
+    # Model backend config for real model turns (see
+    # py_claw.fork.model_config.resolve_fork_model_config). Carries
+    # {"backend": "openai"|"anthropic", "api_key", "api_url", "model", ...}.
+    # None -> child falls back to ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL env.
+    model_config: dict[str, Any] | None = None
 
 
 @dataclass

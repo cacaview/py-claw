@@ -4,12 +4,19 @@ import json
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any
 import sys
 
-from py_claw.mcp.runtime import McpRuntime
+import pytest
+
+from py_claw.mcp.runtime import McpRuntime, MCP_ELICITATION_CREATE_METHOD
 from py_claw.schemas.common import McpClaudeAIProxyServerConfig, McpHttpServerConfig, McpSSEServerConfig, McpSdkServerConfig, McpStdioServerConfig
 from py_claw.settings.loader import SettingsLoadResult
 from py_claw.settings.merge import merge_settings
+from py_claw.services.mcp_auth.elicitation import (
+    ElicitationHandler,
+    reset_elicitation_handler,
+)
 
 
 def _settings_with_sources(*entries: tuple[str, dict[str, object]]) -> SettingsLoadResult:
@@ -432,3 +439,302 @@ def test_claudeai_proxy_transport_uses_message_handler_for_requests_and_notifica
     assert response["message"] == {"jsonrpc": "2.0", "id": 1, "method": "ping"}
     assert runtime.build_statuses(settings)[0].config is not None
     assert runtime.build_statuses(settings)[0].config.type == "claudeai-proxy"
+
+
+# ─── Inbound (server→client) message routing: elicitation ─────────────────────
+
+
+class _FakeElicitationHandler:
+    """Stand-in for ElicitationHandler that records the call and mimics its
+    contract: it delivers the result via respond_fn itself and returns it."""
+
+    def __init__(self, result: dict[str, Any] | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.result = result or {"action": "accept", "content": {"name": "py-claw"}}
+
+    async def handle_elicitation_request(
+        self,
+        server_name: str,
+        request_id: str | int,
+        params: dict[str, Any],
+        signal: Any,
+        respond_fn,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "server_name": server_name,
+                "request_id": request_id,
+                "params": params,
+                "signal": signal,
+                "respond_fn": respond_fn,
+            }
+        )
+        respond_fn(self.result)
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def _clean_global_elicitation_handler() -> None:
+    reset_elicitation_handler()
+    yield
+    reset_elicitation_handler()
+
+
+def _sdk_runtime(
+    bridge_records: list[tuple[str, dict]],
+    handler: object | None = None,
+) -> McpRuntime:
+    """An SDK-server runtime whose sdk_message_handler records every write."""
+    runtime = McpRuntime(
+        runtime_servers={"sdk-server": McpSdkServerConfig(type="sdk", name="sdk-server")},
+        sdk_message_handler=lambda name, message: (bridge_records.append((name, message)), message)[-1],
+        _elicitation_handler=handler,
+    )
+    return runtime
+
+
+def test_inbound_elicitation_routed_to_handler_with_correct_params() -> None:
+    """elicitation/create is routed to the handler; the handler's result is
+    returned and written back exactly once (no double-send)."""
+    handler = _FakeElicitationHandler()
+    bridge: list[tuple[str, dict]] = []
+    runtime = _sdk_runtime(bridge, handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    params = {"message": "Confirm?", "requestedSchema": {"type": "object"}}
+    result = runtime.handle_inbound_message(
+        "sdk-server",
+        {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": MCP_ELICITATION_CREATE_METHOD,
+            "params": params,
+        },
+        settings,
+    )
+
+    # Handler was called exactly once with the assembled parameters.
+    assert len(handler.calls) == 1
+    call = handler.calls[0]
+    assert call["server_name"] == "sdk-server"
+    assert call["request_id"] == 42
+    assert call["params"] == params  # params passed verbatim
+    assert call["signal"] is None  # default: no abort signal
+
+    # The handler's own respond_fn delivered the JSON-RPC response back to
+    # the server over the existing SDK bridge — exactly once, correlated by
+    # the inbound request id. The runtime did not send it a second time.
+    assert bridge == [
+        ("sdk-server", {"jsonrpc": "2.0", "id": 42, "result": result})
+    ]
+    assert result == {"action": "accept", "content": {"name": "py-claw"}}
+
+
+def test_inbound_elicitation_signal_passed_through() -> None:
+    """A caller-provided abort signal is forwarded to the handler untouched."""
+    handler = _FakeElicitationHandler()
+    bridge: list[tuple[str, dict]] = []
+    runtime = _sdk_runtime(bridge, handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    class _Signal:
+        aborted = False
+
+    signal = _Signal()
+    runtime.handle_inbound_message(
+        "sdk-server",
+        {"jsonrpc": "2.0", "id": 7, "method": MCP_ELICITATION_CREATE_METHOD, "params": {}},
+        settings,
+        signal=signal,
+    )
+
+    assert handler.calls[0]["signal"] is signal
+    assert bridge[0][1]["id"] == 7
+
+
+def test_inbound_elicitation_legacy_method_alias_routed() -> None:
+    """The bare 'elicitation' method name (used in this codebase's handler
+    docstrings) is accepted as an alias of elicitation/create."""
+    handler = _FakeElicitationHandler()
+    bridge: list[tuple[str, dict]] = []
+    runtime = _sdk_runtime(bridge, handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    result = runtime.handle_inbound_message(
+        "sdk-server",
+        {"jsonrpc": "2.0", "id": 3, "method": "elicitation", "params": {}},
+        settings,
+    )
+
+    assert len(handler.calls) == 1
+    assert bridge == [("sdk-server", {"jsonrpc": "2.0", "id": 3, "result": result})]
+
+
+def test_inbound_elicitation_via_real_handler_degrades_to_cancel_without_ui() -> None:
+    """Through the inbound path with the real ElicitationHandler and no UI
+    prompter (non-interactive), the request degrades to a cancel and the
+    cancel is sent back to the server exactly once."""
+    handler = ElicitationHandler(timeout=1.0)
+    bridge: list[tuple[str, dict]] = []
+    runtime = _sdk_runtime(bridge, handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    result = runtime.handle_inbound_message(
+        "sdk-server",
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": MCP_ELICITATION_CREATE_METHOD,
+            "params": {"message": "Who are you?"},
+        },
+        settings,
+    )
+
+    assert result == {"action": "cancel"}
+    assert bridge == [("sdk-server", {"jsonrpc": "2.0", "id": 11, "result": {"action": "cancel"}})]
+    assert handler.get_pending_count() == 0  # nothing left dangling
+
+
+def test_inbound_elicitation_ui_prompter_answer_flows_back() -> None:
+    """With a UI prompter registered (as the TUI does), the user's answer is
+    returned to the inbound caller and written back to the server."""
+    handler = ElicitationHandler(timeout=5.0)
+
+    def prompter(server_name: str, params: dict, event, timeout: float | None) -> dict | None:
+        event.resolve({"action": "decline"})
+        return event.wait_for_result(timeout)
+
+    handler.set_ui_prompter(prompter)
+    bridge: list[tuple[str, dict]] = []
+    runtime = _sdk_runtime(bridge, handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    result = runtime.handle_inbound_message(
+        "sdk-server",
+        {"jsonrpc": "2.0", "id": 21, "method": MCP_ELICITATION_CREATE_METHOD, "params": {"message": "m"}},
+        settings,
+    )
+
+    assert result == {"action": "decline"}
+    assert bridge == [("sdk-server", {"jsonrpc": "2.0", "id": 21, "result": {"action": "decline"}})]
+
+
+def test_inbound_other_methods_and_notifications_ignored() -> None:
+    """Other inbound methods and notifications keep their existing behaviour:
+    they are not routed to the elicitation handler and nothing is written
+    back — the main (client→server) path is unaffected."""
+    handler = _FakeElicitationHandler()
+    bridge: list[tuple[str, dict]] = []
+    runtime = _sdk_runtime(bridge, handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    assert (
+        runtime.handle_inbound_message(
+            "sdk-server", {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, settings
+        )
+        is None
+    )
+    assert (
+        runtime.handle_inbound_message(
+            "sdk-server",
+            {"jsonrpc": "2.0", "id": 2, "method": "sampling/createMessage", "params": {}},
+            settings,
+        )
+        is None
+    )
+    assert (
+        runtime.handle_inbound_message(
+            "sdk-server",
+            {"jsonrpc": "2.0", "method": "notifications/roots/list", "params": {}},
+            settings,
+        )
+        is None
+    )
+
+    assert handler.calls == []
+    assert bridge == []
+
+
+def test_inbound_elicitation_unknown_server_raises() -> None:
+    handler = _FakeElicitationHandler()
+    runtime = _sdk_runtime([], handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    with pytest.raises(KeyError):
+        runtime.handle_inbound_message(
+            "ghost",
+            {"jsonrpc": "2.0", "id": 1, "method": MCP_ELICITATION_CREATE_METHOD, "params": {}},
+            settings,
+        )
+    assert handler.calls == []
+
+
+def test_inbound_elicitation_non_sdk_transport_returns_result_without_write() -> None:
+    """Non-SDK transports have no persistent channel; the elicitation result
+    is still returned (so a bridge owning the real connection can send it)
+    and the runtime does not attempt a write."""
+    handler = _FakeElicitationHandler(result={"action": "cancel"})
+    runtime = McpRuntime(
+        runtime_servers={"http-server": McpHttpServerConfig(type="http", url="https://example.com/mcp")},
+        _elicitation_handler=handler,
+    )
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"http-server": {"type": "http", "url": "https://example.com/mcp"}}})
+    )
+
+    result = runtime.handle_inbound_message(
+        "http-server",
+        {"jsonrpc": "2.0", "id": 9, "method": MCP_ELICITATION_CREATE_METHOD, "params": {}},
+        settings,
+    )
+
+    assert result == {"action": "cancel"}
+    assert len(handler.calls) == 1
+    # respond_fn must not raise even though there is no channel to write to.
+    handler.calls[0]["respond_fn"]({"action": "accept"})  # no-op by design
+
+
+def test_inbound_message_must_be_jsonrpc_object() -> None:
+    runtime = McpRuntime()
+    settings = _settings_with_sources(("localSettings", {}))
+
+    with pytest.raises(ValueError):
+        runtime.handle_inbound_message("sdk-server", "not-a-dict", settings)
+
+
+@pytest.mark.asyncio
+async def test_inbound_elicitation_works_from_running_event_loop() -> None:
+    """If the inbound feed is driven from an async context (a running event
+    loop on the calling thread), the handler still completes — it is run on a
+    dedicated worker loop instead of blocking the running one."""
+    handler = _FakeElicitationHandler()
+    bridge: list[tuple[str, dict]] = []
+    runtime = _sdk_runtime(bridge, handler=handler)
+    settings = _settings_with_sources(
+        ("localSettings", {"mcp": {"sdk-server": {"type": "sdk", "name": "sdk-server"}}})
+    )
+
+    result = runtime.handle_inbound_message(
+        "sdk-server",
+        {"jsonrpc": "2.0", "id": 55, "method": MCP_ELICITATION_CREATE_METHOD, "params": {}},
+        settings,
+    )
+
+    assert result == {"action": "accept", "content": {"name": "py-claw"}}
+    assert bridge == [
+        ("sdk-server", {"jsonrpc": "2.0", "id": 55, "result": result})
+    ]

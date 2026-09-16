@@ -78,6 +78,7 @@ from py_claw.services.mcp_auth.elicitation import (
     ElicitationHandler,
     get_elicitation_handler,
     reset_elicitation_handler,
+    set_elicitation_ui_prompter,
 )
 
 from py_claw.services.mcp_auth.registry import (
@@ -150,6 +151,7 @@ __all__ = [
     "ElicitationHandler",
     "get_elicitation_handler",
     "reset_elicitation_handler",
+    "set_elicitation_ui_prompter",
     # registry
     "is_official_mcp_url",
     "prefetch_official_mcp_urls",

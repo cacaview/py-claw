@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from py_claw.fork.backend import ForkedAgentBackend
 from py_claw.fork.child_main import _main
+from py_claw.fork.model_config import resolve_fork_model_config
 from py_claw.fork.process import ForkedAgentProcess
 from py_claw.fork.protocol import (
     ForkErrorMessage,
@@ -21,6 +22,7 @@ from py_claw.fork.protocol import (
 __all__ = [
     "ForkedAgentBackend",
     "ForkedAgentProcess",
+    "resolve_fork_model_config",
     "ForkMessage",
     "ForkInitMessage",
     "ForkTurnMessage",
