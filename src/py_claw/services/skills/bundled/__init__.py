@@ -206,23 +206,6 @@ def init_bundled_skills() -> None:
             )
         )
 
-    # Schedule Remote Agents skill
-    schedule_content = _load_skill_content("scheduleRemoteAgents")
-    if schedule_content:
-        register_bundled_skill(
-            BundledSkillDefinition(
-                name="schedule",
-                description=(
-                    "Create, update, list, or run scheduled remote agents (triggers) that execute on a cron schedule. "
-                    "Use when the user wants to schedule recurring tasks, set up automated workflows, or manage scheduled agents."
-                ),
-                content=schedule_content,
-                source="bundled",
-                allowed_tools=["RemoteTrigger", "AskUserQuestion"],
-                user_invocable=True,
-            )
-        )
-
     # Lorem Ipsum skill
     lorem_content = _load_skill_content("loremIpsum")
     if lorem_content:

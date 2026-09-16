@@ -107,10 +107,38 @@ def detect_theme() -> Theme:
 
 # Global theme instance
 _current_theme: Theme = DEFAULT_THEME
+# (storage mtime, theme name, resolved theme) cache so get_theme() does at
+# most one stat per call and only re-reads themes.json when it changes.
+_theme_disk_cache: tuple[float, str, Theme] | None = None
 
 
 def get_theme() -> Theme:
-    """Get the current active theme."""
+    """Get the current active theme.
+
+    The theme name persisted by the theme service (/theme, stored in
+    ``~/.claude/themes.json``) is mapped onto the Textual theme set, so the
+    TUI picks up theme changes made from the command line.
+    """
+    global _current_theme, _theme_disk_cache
+    try:
+        from py_claw.services.theme.service import (
+            get_current_theme_name,
+            get_theme_storage_path,
+        )
+
+        path = get_theme_storage_path()
+        try:
+            mtime = path.stat().st_mtime if path.exists() else 0.0
+        except OSError:
+            mtime = 0.0
+        if _theme_disk_cache is not None and _theme_disk_cache[0] == mtime:
+            return _current_theme
+        name = get_current_theme_name()
+        _current_theme = LIGHT_THEME if "light" in name else DEFAULT_THEME
+        _theme_disk_cache = (mtime, name, _current_theme)
+    except Exception:
+        # Theme resolution is best-effort; fall back to the in-memory theme.
+        pass
     return _current_theme
 
 

@@ -43,12 +43,13 @@ def _publish_vim_mode_to_tui(mode: VimMode | None) -> None:
     """
     try:
         from py_claw.state.tui_state import update_tui_vim_mode
-        # Convert lowercase vim service mode to uppercase TUI mode
+        # "OFF" unambiguously marks vim-disabled in the store; "INSERT" is
+        # reserved for the *enabled* insert sub-mode, so TUI widgets can
+        # tell "vim off" apart from "vim on, typing".
         if mode is None:
-            update_tui_vim_mode("INSERT")  # Default when disabled
+            update_tui_vim_mode("OFF")
         else:
-            tui_mode = mode.value.upper()
-            update_tui_vim_mode(tui_mode)
+            update_tui_vim_mode(mode.value.upper())
     except ImportError:
         logger.debug("TUI state not available for vim mode publish")
 
@@ -252,13 +253,16 @@ def get_tui_vim_mode() -> str:
     """Get current vim mode from TUI state.
 
     Returns:
-        Uppercase vim mode string ('INSERT', 'NORMAL', 'VISUAL') or 'INSERT' if not in vim mode
+        Uppercase vim mode string ('INSERT', 'NORMAL', 'VISUAL') or 'INSERT'
+        if not in vim mode (including the 'OFF' store sentinel, which marks
+        vim-disabled and behaves like plain insert typing)
     """
     snapshot = _get_tui_state_snapshot()
     if snapshot is None:
         return "INSERT"
     # Return the TUI vim mode, defaulting to INSERT
-    return snapshot.vim_mode or "INSERT"
+    vim_mode = snapshot.vim_mode or "INSERT"
+    return "INSERT" if vim_mode == "OFF" else vim_mode
 
 
 def is_vim_active_in_tui() -> bool:

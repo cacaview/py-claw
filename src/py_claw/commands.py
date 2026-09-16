@@ -17,13 +17,11 @@ from py_claw.new_commands import (
     _remote_env_handler,
     _issue_handler,
     _debug_tool_call_handler,
-    _perf_issue_handler,
     _mock_limits_handler,
     _oauth_refresh_handler,
     _remote_setup_handler,
     _thinkback_play_handler,
     _bridge_kick_handler,
-    _agents_platform_handler,
     _ant_trace_handler,
     _ctx_viz_handler,
 )
@@ -76,12 +74,11 @@ _BUILTIN_COMMANDS: tuple[CommandDefinition, ...] = (
     CommandDefinition(name="think-back", description="Your Claude Code Year in Review", argument_hint="[play|edit|fix|regenerate]"),
     CommandDefinition(name="branch", description="List, create, or switch git branches", argument_hint="[branch-name]"),
     CommandDefinition(name="chrome", description="Claude in Chrome (Beta) settings"),
-    CommandDefinition(name="color", description="Set the prompt bar color for this session", argument_hint="<color|default>"),
     CommandDefinition(name="mobile", description="Show QR code to download the Claude mobile app", argument_hint="[ios|android]"),
     CommandDefinition(name="btw", description="Add a side note to prepend to your next message", argument_hint="<note>"),
     CommandDefinition(name="clear", description="Clear session transcript and state"),
     CommandDefinition(name="config", description="Show or edit configuration settings", argument_hint="[key] [value]"),
-    CommandDefinition(name="compact", description="Compact conversation history to free up context"),
+    CommandDefinition(name="compact", description="Compact conversation history to free up context", argument_hint="<instructions|--rollback>"),
     CommandDefinition(name="context", description="Manage conversation context", argument_hint="[show|clear]"),
     CommandDefinition(name="cost", description="Show token usage and cost estimates for this session"),
     CommandDefinition(name="diff", description="Show git diffs of staged and unstaged changes", argument_hint="[--cached]"),
@@ -90,7 +87,7 @@ _BUILTIN_COMMANDS: tuple[CommandDefinition, ...] = (
     CommandDefinition(name="exit", description="Exit Claude Code", argument_hint=""),
     CommandDefinition(name="export", description="Export conversation to a text file", argument_hint=""),
     CommandDefinition(name="extra-usage", description="Manage extra usage and subscription settings", argument_hint=""),
-    CommandDefinition(name="fast", description="Toggle fast mode for premium speed", argument_hint=""),
+    CommandDefinition(name="fast", description="Toggle fast mode for premium speed", argument_hint="", user_invocable=False),
     CommandDefinition(name="files", description="List files changed in this session"),
     CommandDefinition(name="help", description="Show available slash commands"),
     CommandDefinition(name="heapdump", description="Generate a heap dump for memory profiling", argument_hint="[output-path]"),
@@ -100,10 +97,10 @@ _BUILTIN_COMMANDS: tuple[CommandDefinition, ...] = (
     CommandDefinition(name="keybindings", description="Show configured keyboard shortcuts", argument_hint="[list|set|remove] [key] [command]"),
     CommandDefinition(name="login", description="Log in to Claude Code", argument_hint=""),
     CommandDefinition(name="logout", description="Log out and clear credentials", argument_hint=""),
-    CommandDefinition(name="vim", description="Toggle between Vim and Normal editing modes", argument_hint=""),
+    CommandDefinition(name="vim", description="Toggle between Vim and Normal editing modes", argument_hint="[on|off|status]"),
     CommandDefinition(name="memory", description="Inspect loaded memory state"),
     CommandDefinition(name="model", description="Inspect or change the active model", argument_hint="[model]"),
-    CommandDefinition(name="advisor", description="Configure the advisor model", argument_hint="[<model>|off]"),
+    CommandDefinition(name="advisor", description="Configure the advisor model", argument_hint="[<model>|status|off]"),
     CommandDefinition(name="copy", description="Copy assistant response to clipboard", argument_hint="[N]"),
     CommandDefinition(name="permissions", description="Inspect active permission mode"),
     CommandDefinition(name="plan", description="Inspect plan-mode guidance"),
@@ -186,39 +183,7 @@ Keep your review concise but thorough. Focus on:
 Format your review with clear sections and bullet points.
 
 PR number: {arguments}"""),
-    CommandDefinition(name="pr-comments", description="Get comments from a GitHub pull request", argument_hint="[PR number]", kind="prompt", progress_message="fetching PR comments", prompt_template="""You are an AI assistant integrated into a git-based version control system. Your task is to fetch and display comments from a GitHub pull request.
-
-Follow these steps:
-
-1. Use `gh pr view --json number,headRepository` to get the PR number and repository info
-2. Use `gh api /repos/{owner}/{repo}/issues/{number}/comments` to get PR-level comments
-3. Use `gh api /repos/{owner}/{repo}/pulls/{number}/comments` to get review comments. Pay particular attention to the following fields: `body`, `diff_hunk`, `path`, `line`, etc. If the comment references some code, consider fetching it using eg `gh api /repos/{owner}/{repo}/contents/{path}?ref={branch} | jq .content -r | base64 -d`
-4. Parse and format all comments in a readable way
-5. Return ONLY the formatted comments, with no additional text
-
-Format the comments as:
-
-## Comments
-
-[For each comment thread:]
-- @author file.ts#line:
-  ```diff
-  [diff_hunk from the API response]
-  ```
-  > quoted comment text
-
-  [any replies indented]
-
-If there are no comments, return "No comments found."
-
-Remember:
-1. Only show the actual comments, no explanatory text
-2. Include both PR-level and code review comments
-3. Preserve the threading/nesting of comment replies
-4. Show the file and line number context for code review comments
-5. Use jq to parse the JSON responses from the GitHub API
-
-{arguments}"""),
+    CommandDefinition(name="pr-comments", description="Get comments from a GitHub pull request", argument_hint="[PR number]"),
     CommandDefinition(name="init", description="Initialize CLAUDE.md file with codebase documentation", kind="prompt", progress_message="analyzing codebase", prompt_template="""Please analyze this codebase and create or improve a CLAUDE.md file, which provides guidance to future Claude Code sessions.
 
 What to include:
@@ -327,10 +292,7 @@ Write the configuration to ~/.claude/settings.json under a "statusLine" key.
     CommandDefinition(name="add-dir", description="Add a directory to the allowed list for file operations", argument_hint="<path>"),
     CommandDefinition(name="agents", description="List and manage active agents", argument_hint="[list|stop|info] [agent-id]"),
     CommandDefinition(name="plugin", description="Manage plugins (list, install, uninstall, enable, disable, marketplace)", argument_hint="[list|install|uninstall|enable|disable|marketplace] [args...]"),
-    CommandDefinition(name="test", description="Run tests in the project", argument_hint="[pattern] [--verbose]"),
-    CommandDefinition(name="watch", description="Watch files for changes and run commands on change", argument_hint="<command> [file-pattern]"),
-    CommandDefinition(name="screenshot", description="Take a screenshot of the current screen", argument_hint="[output-path]"),
-    CommandDefinition(name="sandbox-toggle", description="Toggle sandbox mode for security", argument_hint="[on|off|status]"),
+    CommandDefinition(name="sandbox-toggle", description="Toggle sandbox mode for security", argument_hint="[on|off|status]", user_invocable=False),
     CommandDefinition(name="security-review", description="Run a security review on the codebase", argument_hint="[path]", kind="prompt", progress_message="running security review", prompt_template="""You are conducting a security review of the codebase.
 
 Review the code for:
@@ -346,28 +308,21 @@ Review the code for:
 Be thorough and provide specific file paths and line numbers for any issues found.
 
 Path to review: {arguments}"""),
-    CommandDefinition(name="notifications", description="Manage desktop notifications", argument_hint="[list|dismiss|clear]"),
     CommandDefinition(name="onboarding", description="Show onboarding information", argument_hint=""),
-    CommandDefinition(name="output-style", description="Configure output styling", argument_hint="[default|compact|detailed]"),
-    CommandDefinition(name="subscribe", description="Subscribe to events and get notified", argument_hint="<event-type> [filter]"),
-    CommandDefinition(name="feedback", description="Send feedback about Claude Code", argument_hint="<message>"),
-    CommandDefinition(name="effort", description="Set effort level for tasks", argument_hint="[low|medium|high]"),
-    CommandDefinition(name="share", description="Share current session or artifacts", argument_hint="[session|artifact] [id]"),
+    CommandDefinition(name="output-style", description="Configure output styling", argument_hint="[default|compact|detailed]", user_invocable=False),
+    CommandDefinition(name="effort", description="Set effort level for tasks", argument_hint="[low|medium|high]", user_invocable=False),
 CommandDefinition(name="stickers", description="Order Claude Code stickers", argument_hint=""),
     CommandDefinition(name="reset-limits", description="Reset usage limits and rate limit counters", argument_hint="", user_invocable=False),
     CommandDefinition(name="summary", description="Generate a summary of the conversation", argument_hint="", user_invocable=False),
     CommandDefinition(name="install-slack-app", description="Install the Claude Code Slack app", argument_hint=""),
     CommandDefinition(name="install-github-app", description="Set up Claude GitHub Actions for a repository", argument_hint="<repo> [--api-key <key>] [--workflow claude|claude-review|both]"),
     CommandDefinition(name="install", description="Install or update Claude Code", argument_hint="[stable|latest|version]"),
-    CommandDefinition(name="teleport", description="Teleport to a remote environment", argument_hint="[session-id|host]"),
+    CommandDefinition(name="teleport", description="Teleport to a remote environment", argument_hint="[session-id|host]", user_invocable=False),
     CommandDefinition(name="tunnel", description="Create a tunnel for remote access", argument_hint="[start|stop|status]"),
-    CommandDefinition(name="upgrade", description="Upgrade Claude Code to a newer version", argument_hint="[stable|latest|version]"),
     CommandDefinition(name="usage", description="Show usage information and limits", argument_hint=""),
     CommandDefinition(name="version", description="Show version information", argument_hint=""),
     CommandDefinition(name="voice", description="Configure voice input and output", argument_hint="[on|off|status|device]"),
-    CommandDefinition(name="workspace", description="Manage workspace configuration", argument_hint="[show|set|reset] [key=value]"),
     CommandDefinition(name="desktop", description="Interact with desktop applications", argument_hint="<action> [args...]"),
-    CommandDefinition(name="break-cache", description="Clear cached data and refresh state", argument_hint="[all|tools|settings]"),
     CommandDefinition(name="autofix-pr", description="Automatically fix issues in a PR", argument_hint="[PR number]", kind="prompt", progress_message="running autofix", prompt_template="""You are automatically fixing issues in a pull request. Analyze the PR changes, identify issues, and create fixes.
 
 Steps:
@@ -405,9 +360,9 @@ Steps:
 4. Verify consistency
 
 Session to backfill: {arguments}"""),
-    CommandDefinition(name="bridge", description="Remote Control bridge for connected clients", argument_hint="[start|stop|status|connect]"),
+    CommandDefinition(name="bridge", description="Remote Control bridge for connected clients", argument_hint="[start|stop|status]"),
     CommandDefinition(name="brief", description="Toggle brief-only mode (KAIROS feature)", argument_hint=""),
-    CommandDefinition(name="ultraplan", description="Use ultraplan mode for CCR sessions (ULTRAPLAN feature gate)", argument_hint="[seed_plan]"),
+    CommandDefinition(name="ultraplan", description="Use ultraplan mode for CCR sessions (ULTRAPLAN feature gate)", argument_hint="[seed_plan]", user_invocable=False),
     # M105, M107, M110, M112 - newly implemented commands
     CommandDefinition(name="rate-limit-options", description="Show rate limit options (internal)", argument_hint=""),
     CommandDefinition(name="remote-env", description="Configure default remote environment for teleport", argument_hint="[set <id>]"),
@@ -415,14 +370,12 @@ Session to backfill: {arguments}"""),
     # Missing commands from todo.md
     CommandDefinition(name="issue", description="Interact with issue tracking systems", argument_hint="[list|show|create] [args...]"),
     CommandDefinition(name="debug-tool-call", description="Debug a specific tool invocation", argument_hint="<tool-name>"),
-    CommandDefinition(name="perf-issue", description="Diagnose performance problems", argument_hint="[area]"),
-    CommandDefinition(name="mock-limits", description="Simulate rate limit errors for testing", argument_hint="<type> [duration]"),
+    CommandDefinition(name="mock-limits", description="Simulate rate limit errors for testing", argument_hint="<type> [duration]", user_invocable=False),
     CommandDefinition(name="oauth-refresh", description="Refresh OAuth tokens", argument_hint="[service]"),
     CommandDefinition(name="remote-setup", description="Configure remote connections", argument_hint="[action]"),
     CommandDefinition(name="thinkback-play", description="Play back think-back history", argument_hint="[session-id]"),
-    CommandDefinition(name="bridge-kick", description="Inject bridge fault state (internal)", argument_hint=""),
-    CommandDefinition(name="agents-platform", description="Manage agents platform", argument_hint="[action]"),
-    CommandDefinition(name="ant-trace", description="Trace Ant internal operations (internal)", argument_hint=""),
+    CommandDefinition(name="bridge-kick", description="Inject bridge fault state (internal)", argument_hint="", user_invocable=False),
+    CommandDefinition(name="ant-trace", description="Trace Ant internal operations (internal)", argument_hint="", user_invocable=False),
     CommandDefinition(name="ctx_viz", description="Visualize context usage", argument_hint=""),
 )
 
@@ -563,6 +516,8 @@ def _help_handler(
 ) -> str:
     lines = ["Available slash commands:"]
     for entry in registry.list():
+        if not entry.user_invocable:
+            continue
         suffix = f" {entry.argument_hint}" if entry.argument_hint else ""
         lines.append(f"- /{entry.name}{suffix} — {entry.description}")
     return "\n".join(lines)
@@ -579,10 +534,14 @@ def _status_handler(
     transcript_size: int,
 ) -> str:
     model = state.model or settings.effective.get("model") or "default"
-    return "\n".join(
+    lines = [
+        f"model: {model}",
+        f"permission_mode: {state.permission_mode}",
+    ]
+    if getattr(state, "agent_name", None):
+        lines.append(f"agent_name: {state.agent_name}")
+    lines.extend(
         [
-            f"model: {model}",
-            f"permission_mode: {state.permission_mode}",
             f"commands: {len(registry.list())}",
             f"agents: {len(state.initialized_agents)}",
             f"tasks: {len(state.task_runtime.list())}",
@@ -590,6 +549,7 @@ def _status_handler(
             f"transcript_messages: {transcript_size}",
         ]
     )
+    return "\n".join(lines)
 
 
 def _privacy_settings_handler(
@@ -1160,78 +1120,50 @@ def _advisor_handler(
 ) -> str:
     """Configure the advisor model.
 
-    The advisor is a stronger model that reviews the conversation and provides guidance.
-    Usage: /advisor [<model>|off]
+    When set, the advisor model briefly reviews each completed turn's answer
+    and the review is appended to the response shown to the user.
+    Usage: /advisor [<model>|status|off]
     """
-    arg = arguments.strip().lower()
+    arg = arguments.strip()
+    sub = arg.lower()
 
-    # Get base model for checking support
-    base_model = state.model or settings.effective.get("model") or ""
-
-    # Check if model supports advisor
-    def model_supports_advisor(model: str) -> bool:
-        m = model.lower()
-        return "opus" in m or "sonnet" in m
-
-    def is_valid_advisor_model(model: str) -> bool:
-        m = model.lower()
-        return "opus" in m or "sonnet" in m
-
-    def normalize_model(model: str) -> str:
-        """Normalize model string for API."""
-        model = model.strip().lower()
-        # Map common aliases
-        if model in ("opus", "op"):
-            return "opus-4-6-20251114"
-        if model in ("sonnet", "son"):
-            return "sonnet-4-6-20251114"
-        if model in ("haiku", "ha"):
-            return "haiku-4-6-20250320"
-        if model in ("claude", "default"):
-            return "claude-sonnet-4-6-20251114"
-        return model
-
-    if not arg:
+    if not arg or sub == "status":
         # Show current advisor status
         current = state.advisor_model
         if not current:
             return (
                 "Advisor: not set\n"
-                "Use \"/advisor <model>\" to enable (e.g., \"/advisor opus\")."
-            )
-        if not model_supports_advisor(base_model):
-            return (
-                f"Advisor: {current} (inactive)\n"
-                f"The current model ({base_model}) does not support advisors."
+                'Use "/advisor <model>" to enable (e.g., "/advisor opus").'
             )
         return (
             f"Advisor: {current}\n"
-            'Use "/advisor unset" to disable or "/advisor <model>" to change.'
+            'Use "/advisor off" to disable or "/advisor <model>" to change.'
         )
 
-    if arg in ("unset", "off"):
+    if sub in ("unset", "off"):
         prev = state.advisor_model
         state.advisor_model = None
         if prev:
             return f"Advisor disabled (was {prev})."
         return "Advisor already unset."
 
-    # Validate and set model
-    normalized = normalize_model(arg)
-    if not is_valid_advisor_model(arg):
-        return (
-            f"The model {arg} cannot be used as an advisor.\n"
-            "Valid advisor models: opus, sonnet"
-        )
+    def normalize_model(model: str) -> str:
+        """Normalize model string for API."""
+        model = model.strip()
+        # Map common aliases
+        lowered = model.lower()
+        if lowered in ("opus", "op"):
+            return "opus-4-6-20251114"
+        if lowered in ("sonnet", "son"):
+            return "sonnet-4-6-20251114"
+        if lowered in ("haiku", "ha"):
+            return "haiku-4-6-20250320"
+        if lowered in ("claude", "default"):
+            return "claude-sonnet-4-6-20251114"
+        return model
 
-    state.advisor_model = normalized
-    if not model_supports_advisor(base_model):
-        return (
-            f"Advisor set to {normalized}.\n"
-            f"Note: Your current model ({base_model}) does not support advisors. "
-            "Switch to a supported model to use the advisor."
-        )
-    return f"Advisor set to {normalized}."
+    state.advisor_model = normalize_model(arg)
+    return f"Advisor set to {state.advisor_model}."
 
 
 def _copy_handler(
@@ -1362,50 +1294,6 @@ def _clear_handler(
     return "Session transcript cleared."
 
 
-def _color_handler(
-    command: CommandDefinition,
-    *,
-    arguments: str,
-    state: RuntimeState,
-    settings: SettingsLoadResult,
-    registry: CommandRegistry,
-    session_id: str | None,
-    transcript_size: int,
-) -> str:
-    """Set the prompt bar color for this session."""
-    import os
-
-    # Check if running as teammate
-    is_teammate = os.environ.get("CLAUDE_TEAM_MODE") == "true"
-
-    if is_teammate:
-        return "Cannot set color: This session is a swarm teammate. Teammate colors are assigned by the team leader."
-
-    args = arguments.strip().lower()
-
-    # Available agent colors
-    AGENT_COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"]
-    RESET_ALIASES = ["default", "reset", "none", "gray", "grey"]
-
-    if not args:
-        lines = ["=== Claude Code Color ===", ""]
-        lines.append(f"Available colors: {', '.join(AGENT_COLORS)}, default")
-        lines.append("")
-        lines.append("Use /color <name> to set a color.")
-        lines.append("Use /color default to reset to the default color.")
-        return "\n".join(lines)
-
-    # Handle reset
-    if args in RESET_ALIASES:
-        return "Session color reset to default."
-
-    if args not in AGENT_COLORS:
-        return f"Invalid color '{args}'. Available colors: {', '.join(AGENT_COLORS)}, default"
-
-    # Color setting would require AppState integration - for now just confirm
-    return f"Session color set to: {args}"
-
-
 def _mobile_handler(
     command: CommandDefinition,
     *,
@@ -1417,6 +1305,8 @@ def _mobile_handler(
     transcript_size: int,
 ) -> str:
     """Show QR code to download the Claude mobile app."""
+    from py_claw.session import _generate_qr_code
+
     args = arguments.strip().lower()
 
     platform = args if args in ("ios", "android") else None
@@ -1434,41 +1324,19 @@ def _mobile_handler(
 
     lines = ["=== Claude Code Mobile App ===", ""]
 
-    # Try to generate QR codes
-    try:
-        import qrcode
-        import io
-
-        for plat, info in PLATFORMS.items():
-            if platform and platform != plat:
-                continue
-            lines.append(f"{info['name']}: {info['url']}")
-            qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=2)
-            qr.add_data(info["url"])
-            qr.make(fit=True)
-            img = qr.make_image()
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            buf.seek(0)
-            import base64
-            img_data = base64.b64encode(buf.read()).decode("ascii")
-            # For text output, show URL and note that QR requires GUI
-            lines.append(f"  [QR code available - open {info['url']} to download]")
-
-        if not platform:
-            lines.append("")
-            lines.append("Use /mobile ios or /mobile android to show a specific platform.")
+    for plat, info in PLATFORMS.items():
+        if platform and platform != plat:
+            continue
+        lines.append(f"{info['name']}: {info['url']}")
         lines.append("")
-        lines.append("Or visit: https://claude.com/code")
-    except ImportError:
-        # Fallback without qrcode
-        lines.append("Mobile app download:")
-        if not platform or platform == "ios":
-            lines.append("  iOS: https://apps.apple.com/app/claude-by-anthropic/id6473753684")
-        if not platform or platform == "android":
-            lines.append("  Android: https://play.google.com/store/apps/details?id=com.anthropic.claude")
+        lines.append(_generate_qr_code(info["url"]))
         lines.append("")
-        lines.append("Use /mobile ios or /mobile android for details.")
+
+    if not platform:
+        lines.append("Use /mobile ios or /mobile android to show a specific platform.")
+    lines.append("If the QR code doesn't scan, open the URL above directly in your phone's browser.")
+    lines.append("")
+    lines.append("Or visit: https://claude.com/code")
 
     return "\n".join(lines)
 
@@ -1634,6 +1502,16 @@ def _config_handler(
     return f"{key}: {value}"
 
 
+def _compact_summary_text(result) -> str:
+    """Extract the generated summary text from a CompactionResult."""
+    if not result.summary_messages:
+        return ""
+    first = result.summary_messages[0]
+    message = first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
+    content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
+    return str(content) if content else ""
+
+
 def _compact_handler(
     command: CommandDefinition,
     *,
@@ -1645,46 +1523,85 @@ def _compact_handler(
     transcript_size: int,
 ) -> str:
     """Handle compact command - summarize conversation to free context."""
-    import platform
+    import asyncio
+
+    from py_claw.services.compact import (
+        build_compact_api_client,
+        build_compact_transcript,
+        run_manual_compact,
+    )
+
+    args = arguments.strip()
+    query_runtime = state.query_runtime
+    session = session_id or (query_runtime.current_session_id() if query_runtime is not None else None) or ""
+
+    # /compact --rollback: restore the pre-compact transcript snapshot.
+    if args in ("--rollback", "rollback"):
+        if query_runtime is None:
+            return "Error: no active query runtime"
+        success, message = query_runtime.restore_compact_snapshot(session)
+        if not success:
+            return f"Cannot roll back: {message}"
+        return f"=== Claude Code Compact ===\n\n{message}"
 
     if transcript_size == 0:
         return "No conversation history to compact."
 
-    # Try to get compact configuration
-    config = None
+    if query_runtime is None:
+        return "Error: no active query runtime; nothing to compact."
+
+    transcript = query_runtime.transcript
+    if len(transcript) < 2:
+        return "Not enough conversation history to compact (need at least 2 messages)."
+
+    # Rollback safety: snapshot the transcript before any destructive change.
+    query_runtime.save_compact_snapshot(session)
+
+    api_client = build_compact_api_client()
+    custom_instructions = args or None
+
     try:
-        from py_claw.services.compact import CompactConfig
-        config = CompactConfig()
-    except Exception:
-        pass
+        result = asyncio.run(
+            run_manual_compact(
+                transcript,
+                api_client=api_client,
+                custom_instructions=custom_instructions,
+            )
+        )
+    except ValueError as exc:
+        query_runtime.discard_compact_snapshot(session)
+        return f"Nothing to compact: {exc}"
+    except Exception as exc:
+        query_runtime.discard_compact_snapshot(session)
+        return f"Compact failed, transcript unchanged: {exc}"
+
+    new_transcript = build_compact_transcript(result)
+    query_runtime.replace_transcript(new_transcript)
 
     lines = ["=== Claude Code Compact ===", ""]
-    lines.append(f"Current transcript: {transcript_size} messages")
-    lines.append("")
+    lines.append(f"Compacted {len(transcript)} messages -> {len(new_transcript)} messages")
+    if result.pre_compact_token_count is not None or result.post_compact_token_count is not None:
+        lines.append(
+            f"Estimated tokens: {result.pre_compact_token_count or 0} -> {result.post_compact_token_count or 0}"
+        )
 
-    if config:
-        lines.append(f"Auto-compaction: {'enabled' if config.auto_compact_enabled else 'disabled'}")
-        lines.append(f"Minimum tokens: {config.minimum_message_tokens}")
+    summary_text = _compact_summary_text(result)
+    if summary_text:
         lines.append("")
-
-    # Check session memory
-    try:
-        from py_claw.services.session_memory import get_session_memory_config
-        sm_config = get_session_memory_config()
-        lines.append(f"Session memory: {'enabled' if sm_config.enabled else 'disabled'}")
-        if sm_config.enabled:
-            lines.append(f"  Threshold: {sm_config.accumulated_threshold} tokens")
-    except Exception:
-        pass
-
-    lines.append("")
-    lines.append("Options:")
-    lines.append("  /compact - Compact without arguments")
-    if arguments.strip():
-        lines.append(f"  /compact {arguments} - Compact with custom instructions")
+        lines.append("Summary:")
+        lines.append(summary_text)
     else:
-        lines.append("  /compact <instructions> - Compact with custom instructions")
+        lines.append("")
+        lines.append("No summary generated (API client unavailable or the summary call failed);")
+        lines.append("older messages were replaced by the compact boundary marker.")
+
+    if custom_instructions:
+        lines.append("")
+        lines.append(f"Applied custom instructions: {custom_instructions}")
+
     lines.append("")
+    lines.append("Rollback: run /compact --rollback to restore the pre-compact transcript")
+    lines.append("(in-memory snapshot kept for the current session).")
     lines.append("Use /clear to reset conversation history entirely.")
 
     return "\n".join(lines)
@@ -2283,19 +2200,20 @@ def _usage_handler(
 
     if is_logged_in:
         lines.append("Account: Claude.ai subscriber")
-        lines.append("")
-        lines.append("Usage limits:")
-        lines.append("  API Requests: Unlimited (within rate limits)")
-        lines.append("  Sessions: Unlimited")
-        lines.append("  Tokens: Context window dependent")
     else:
         lines.append("Account: Not logged in")
         lines.append("")
-        lines.append("Usage information requires login.")
         lines.append("Run /login to sign in to your Claude.ai account.")
 
     lines.append("")
     lines.append("Current session:")
+    total_tokens = state.session_input_tokens + state.session_output_tokens
+    lines.append(f"  Input tokens: {state.session_input_tokens:,}")
+    lines.append(f"  Output tokens: {state.session_output_tokens:,}")
+    lines.append(f"  Total tokens: {total_tokens:,}")
+    lines.append(f"  Estimated cost: ${state.session_cost_usd:.4f}")
+    if state.session_cache_read_tokens:
+        lines.append(f"  Cache read tokens: {state.session_cache_read_tokens:,}")
     lines.append(f"  Transcript messages: {transcript_size}")
     lines.append(f"  Session ID: {session_id or 'none'}")
     lines.append("")
@@ -2304,7 +2222,7 @@ def _usage_handler(
     lines.append(f"  Python: {platform.python_version()}")
     lines.append(f"  py-claw: {__import__('py_claw').__version__}")
     lines.append("")
-    lines.append("Use /stats for detailed session statistics.")
+    lines.append("Use /cost for a detailed cost report, /stats for session statistics.")
 
     return "\n".join(lines)
 
@@ -2612,10 +2530,8 @@ def _bridge_handler(
         return _bridge_start(settings)
     elif args == "stop":
         return _bridge_stop()
-    elif args == "connect":
-        return "Bridge client connection is not yet implemented."
     else:
-        return f"Unknown argument: {args}\nUsage: /bridge [start|stop|status|connect]"
+        return f"Unknown argument: {args}\nUsage: /bridge [start|stop|status]"
 
 
 def _bridge_status() -> str:
@@ -2651,11 +2567,10 @@ def _bridge_status() -> str:
     lines.append("")
     lines.append(f"Bridge state: {bridge_state._global_state.value}")
     lines.append("")
-    lines.append("Usage: /bridge [start|stop|status|connect]")
+    lines.append("Usage: /bridge [start|stop|status]")
     lines.append("  start   - Start the bridge server")
     lines.append("  stop    - Stop the bridge server")
     lines.append("  status  - Show bridge connection status")
-    lines.append("  connect - Connect to a bridge server (viewer mode)")
 
     return "\n".join(lines)
 
@@ -2773,29 +2688,6 @@ def _get_local_ip() -> str:
         return "127.0.0.1"
 
 
-def _break_cache_handler(
-    command: CommandDefinition,
-    *,
-    arguments: str,
-    state: RuntimeState,
-    settings: SettingsLoadResult,
-    registry: CommandRegistry,
-    session_id: str | None,
-    transcript_size: int,
-) -> str:
-    """Clear cached data and refresh state."""
-    args = arguments.strip().lower()
-
-    if not args or args == "all":
-        return "Cache cleared. All internal caches have been refreshed."
-    elif args == "tools":
-        return "Tool cache cleared. Tools will be reloaded on next use."
-    elif args == "settings":
-        return "Settings cache cleared. Settings will be reloaded on next use."
-    else:
-        return f"Unknown cache type: {args}\nUsage: /break-cache [all|tools|settings]"
-
-
 def _heapdump_handler(
     command: CommandDefinition,
     *,
@@ -2807,10 +2699,41 @@ def _heapdump_handler(
     transcript_size: int,
 ) -> str:
     """Generate a heap dump for memory profiling."""
-    path = arguments.strip()
-    if not path:
-        path = "heapdump.heapsnapshot"
-    return f"Heap dump would be written to: {path}\nNote: This is a placeholder - actual heap dump requires gdp or similar tooling."
+    import asyncio
+    from pathlib import Path
+
+    from py_claw.services.heap_dump.service import (
+        get_heap_dump_config,
+        perform_heap_dump,
+        set_heap_dump_config,
+    )
+    from py_claw.services.heap_dump.types import HeapDumpConfig
+
+    path_arg = arguments.strip()
+    # An optional path argument overrides the default dump directory (~/Desktop).
+    if path_arg:
+        current = get_heap_dump_config()
+        dump_dir = str(Path(path_arg).expanduser())
+        if current.dump_dir != dump_dir:
+            set_heap_dump_config(
+                HeapDumpConfig(
+                    enabled=current.enabled,
+                    dump_dir=dump_dir,
+                    auto_dump_threshold_gb=current.auto_dump_threshold_gb,
+                )
+            )
+
+    result = asyncio.run(perform_heap_dump(trigger="manual"))
+    if not result.success:
+        return f"Heap dump failed: {result.error}"
+    lines = [
+        "Heap dump complete.",
+        f"  Heap snapshot: {result.heap_path}",
+        f"  Diagnostics:   {result.diag_path}",
+    ]
+    if path_arg:
+        lines.append(f"  Output dir:    {path_arg}")
+    return "\n".join(lines)
 
 
 def _sandbox_toggle_handler(
@@ -3020,34 +2943,6 @@ def _ultraplan_handler(
     return "\n".join(lines)
 
 
-def _upgrade_handler(
-    command: CommandDefinition,
-    *,
-    arguments: str,
-    state: RuntimeState,
-    settings: SettingsLoadResult,
-    registry: CommandRegistry,
-    session_id: str | None,
-    transcript_size: int,
-) -> str:
-    """Upgrade Claude Code to a newer version."""
-    args = arguments.strip().lower()
-
-    if not args:
-        return """=== Claude Code Upgrade ===
-
-Current version: check with /version
-
-Usage: /upgrade [stable|latest|version]
-  stable - Upgrade to latest stable release
-  latest - Upgrade to latest development release
-  version - Upgrade to a specific version"""
-    elif args in ("stable", "latest"):
-        return "Auto-upgrade is not yet implemented in this version."
-    else:
-        return f"Upgrade to version '{args}' is not supported."
-
-
 def _voice_handler(
     command: CommandDefinition,
     *,
@@ -3068,9 +2963,18 @@ def _voice_handler(
     # Check if SoX is available for audio recording
     sox_available = shutil.which("sox") is not None or shutil.which("sox.exe") is not None
 
-    # Get voice settings from effective settings
+    # Get voice settings from the global config (written by /voice on|off),
+    # falling back to effective settings.
     effective = settings.effective
-    voice_enabled = effective.get("voiceEnabled", False) if isinstance(effective, dict) else False
+    voice_enabled: bool | None = None
+    try:
+        from py_claw.services.config.service import get_global_config
+
+        voice_enabled = getattr(get_global_config(), "voiceEnabled", None)
+    except Exception:
+        voice_enabled = None
+    if voice_enabled is None:
+        voice_enabled = effective.get("voiceEnabled", False) if isinstance(effective, dict) else False
     voice_language = effective.get("language", "en") if isinstance(effective, dict) else "en"
 
     if not args or args == "status":
@@ -3102,21 +3006,45 @@ def _voice_handler(
                 lines.append("  - Linux: sudo yum install sox (RHEL/CentOS)")
             return "\n".join(lines)
 
+        try:
+            from py_claw.services.config.service import save_global_config
+            from py_claw.services.config.types import GlobalConfig
+
+            save_global_config(
+                lambda current: GlobalConfig(**{**current.model_dump(), "voiceEnabled": True})
+            )
+        except Exception as e:
+            return f"Failed to enable voice: {e}"
+
         lines = ["=== Voice Enabled ===", ""]
-        lines.append("Voice mode has been enabled.")
+        lines.append("Voice mode enabled (voiceEnabled=true written to global config).")
         lines.append("")
-        lines.append("To use voice input:")
-        lines.append("  - Hold Space to record")
-        lines.append("  - Release to send")
-        lines.append("")
-        lines.append("Note: Voice settings update requires restart to take effect.")
+        lines.append("Voice input is available via the Voice tool.")
         return "\n".join(lines)
 
     elif args == "off":
+        try:
+            from py_claw.services.config.service import save_global_config
+            from py_claw.services.config.types import GlobalConfig
+
+            save_global_config(
+                lambda current: GlobalConfig(**{**current.model_dump(), "voiceEnabled": False})
+            )
+        except Exception as e:
+            return f"Failed to disable voice: {e}"
+
+        # Stop any running voice capture (safe no-op when voice is not active).
+        try:
+            import asyncio
+
+            from py_claw.services.voice.service import stop_voice
+
+            asyncio.run(stop_voice())
+        except Exception:
+            pass
+
         lines = ["=== Voice Disabled ===", ""]
-        lines.append("Voice mode has been disabled.")
-        lines.append("")
-        lines.append("Note: Voice settings update requires restart to take effect.")
+        lines.append("Voice mode disabled (voiceEnabled=false written to global config).")
         return "\n".join(lines)
 
     elif args == "device":
@@ -3219,16 +3147,58 @@ def _keybindings_handler(
     session_id: str | None,
     transcript_size: int,
 ) -> str:
-    """Show configured keyboard shortcuts."""
-    keybindings = settings.effective.get("keybindings", {})
+    """Show or manage keyboard shortcuts (backed by keybindings.json)."""
+    from py_claw.services.keybindings.service import (
+        get_keybindings_path,
+        load_keybindings,
+        save_keybindings,
+    )
+    from py_claw.services.keybindings.types import Keybinding
 
-    if not keybindings:
-        return "No keybindings configured. Keybindings can be set in settings.json."
+    args = arguments.strip().split()
+    sub = args[0].lower() if args else "list"
 
-    lines = ["=== Configured Keybindings ===", ""]
-    for key, action in sorted(keybindings.items()):
-        lines.append(f"  {key} → {action}")
-    return "\n".join(lines)
+    if sub == "list":
+        bindings = load_keybindings()
+        lines = ["=== Keybindings ===", ""]
+        for kb in bindings:
+            desc = f"  ({kb.description})" if kb.description else ""
+            lines.append(f"  {kb.key} → {kb.command}{desc}")
+        lines.append("")
+        lines.append(f"File: {get_keybindings_path()}")
+        lines.append("Usage: /keybindings set <key> <command> | /keybindings remove <key>")
+        return "\n".join(lines)
+
+    if sub == "set":
+        if len(args) < 3:
+            return "Usage: /keybindings set <key> <command>"
+        key, command_name = args[1], args[2]
+        existing = {kb.key: kb for kb in load_keybindings()}
+        previous = existing.get(key)
+        existing[key] = Keybinding(
+            key=key,
+            command=command_name,
+            description=previous.description if previous is not None else None,
+        )
+        result = save_keybindings(list(existing.values()))
+        if not result.success:
+            return f"Failed to save keybinding: {result.message}"
+        return f"Keybinding set: {key} → {command_name} ({result.path})"
+
+    if sub == "remove":
+        if len(args) < 2:
+            return "Usage: /keybindings remove <key>"
+        key = args[1]
+        existing = {kb.key: kb for kb in load_keybindings()}
+        if key not in existing:
+            return f"No keybinding found for key: {key}"
+        del existing[key]
+        result = save_keybindings(list(existing.values()))
+        if not result.success:
+            return f"Failed to save keybinding: {result.message}"
+        return f"Keybinding removed: {key} ({result.path})"
+
+    return "Usage: /keybindings [list|set <key> <command>|remove <key>]"
 
 
 def _btw_handler(
@@ -3247,7 +3217,7 @@ def _btw_handler(
 
     # Store the btw note in the session for the next message
     # This would ideally be stored in session state and prepended to the next user message
-    return f"BTW noted: {arguments.strip()}\nThis will be prepended to your next message." + "\n\n# ------------------------------------------------------------------\n# M112: /rename \u2014 Rename the current session\n# ------------------------------------------------------------------"
+    return f"BTW noted: {arguments.strip()}\nThis will be prepended to your next message."
 def _rename_handler(
     command: CommandDefinition,
     *,
@@ -3274,7 +3244,23 @@ def _rename_handler(
     if not new_name:
         new_name = "unnamed-session"
     state.agent_name = new_name
-    return f"Session renamed to: {new_name}"
+
+    # Persist the name into the session JSONL so /sessions, resume, and the
+    # metadata reader (extract_last_json_string_field) pick it up. Appending a
+    # new record is backward compatible — the reader takes the last value.
+    if session_id:
+        try:
+            from py_claw.services.session_storage.writer import append_session_entries
+
+            append_session_entries(
+                session_id,
+                state.cwd,
+                [{"type": "agentName", "agentName": new_name}],
+            )
+            return f"Session renamed to: {new_name}"
+        except Exception:
+            return f"Session renamed to: {new_name} (in-memory only; could not persist to session file)"
+    return f"Session renamed to: {new_name} (in-memory only; no active session file)"
 
 
 # ------------------------------------------------------------------
@@ -3293,7 +3279,9 @@ def _pr_comments_handler(
     transcript_size: int,
 ) -> str:
     """Show GitHub pull request comments."""
+    import json
     import shutil
+    import subprocess
     if not shutil.which("gh"):
         return "Error: `gh` CLI is not installed. Install from https://cli.github.com/"
     cwd = state.cwd
@@ -3341,8 +3329,8 @@ def _pr_comments_handler(
     )
     if issues_comments.returncode == 0 and issues_comments.stdout.strip():
         has_comments = True
-        lines.append("\\n### PR Comments")
-        for line in issues_comments.stdout.strip().split("\\n"):
+        lines.append("\n### PR Comments")
+        for line in issues_comments.stdout.strip().split("\n"):
             if not line.strip():
                 continue
             try:
@@ -3354,7 +3342,7 @@ def _pr_comments_handler(
                 continue
     if not has_comments:
         lines.append("No comments found on this PR.")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------
@@ -3373,15 +3361,14 @@ def _rate_limit_options_handler(
     transcript_size: int,
 ) -> str:
     """Show rate limit options when hitting Claude AI limits."""
-    return "\\n".join([
+    return "\n".join([
         "=== Rate Limit Options ===",
         "",
         "You have hit a Claude AI rate limit. Options:",
-        "  1. /upgrade — Upgrade your plan",
-        "  2. /extra-usage — Purchase additional usage",
-        "  3. Wait for your limit to reset (automatic)",
+        "  1. /extra-usage — Purchase additional usage",
+        "  2. Wait for your limit to reset (automatic)",
         "",
-        "Use /upgrade or /extra-usage for those actions.",
+        "Use /extra-usage to purchase additional usage.",
     ])
 
 
@@ -3401,15 +3388,46 @@ def _remote_env_handler(
     transcript_size: int,
 ) -> str:
     """Configure default remote environment for teleport sessions."""
+    teleport_config = settings.effective.get("teleport") or {}
+    environments = teleport_config.get("environments") or []
+
+    def _env_id(env: object) -> str:
+        if isinstance(env, dict):
+            return str(env.get("id", ""))
+        return str(env)
+
+    parts = arguments.strip().split()
+    if len(parts) >= 2 and parts[0].lower() == "set":
+        env_id = parts[1]
+        valid_ids = [_env_id(env) for env in environments]
+        if env_id not in valid_ids:
+            known = ", ".join(i for i in valid_ids if i) or "none configured"
+            return f"Unknown environment id: {env_id}\nKnown environments: {known}\nRun /remote-env to list them."
+        try:
+            from py_claw.services.config.service import save_global_config
+            from py_claw.services.config.types import GlobalConfig
+
+            def set_default_environment(config):
+                teleport = dict(config.model_dump().get("teleport") or {})
+                teleport["defaultEnvironment"] = env_id
+                return GlobalConfig(**{**config.model_dump(), "teleport": teleport})
+
+            save_global_config(set_default_environment)
+        except Exception as e:
+            return f"Failed to save default environment: {e}"
+        return f"Default remote environment set to: {env_id} (teleport.defaultEnvironment)"
+
     lines = ["=== Remote Environment Configuration ===", ""]
-    teleport_config = settings.effective.get("teleport", {})
-    environments = teleport_config.get("environments", [])
     if not environments:
         lines.append("No remote environments configured.")
         lines.append("")
         lines.append("Configure in ~/.claude/settings.json:")
         lines.append('  { "teleport": { "environments": [...] } }')
-        return "\\n".join(lines)
+        return "\n".join(lines)
+    default_env = teleport_config.get("defaultEnvironment")
+    if default_env:
+        lines.append(f"Default environment: {default_env}")
+        lines.append("")
     lines.append(f"Available remote environments ({len(environments)}):")
     lines.append("")
     for env in environments:
@@ -3425,7 +3443,7 @@ def _remote_env_handler(
     lines.append("To set a default, use: /remote-env set <id>")
     lines.append("Or configure in settings.json:")
     lines.append('  { "teleport": { "defaultEnvironment": "<id>" } }')
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def _login_handler(
@@ -3534,40 +3552,58 @@ def _vim_handler(
     session_id: str | None,
     transcript_size: int,
 ) -> str:
-    """Toggle between Vim and Normal editing modes."""
-    # Get current editor mode from settings
-    effective_settings = settings.effective
-    current_mode = "normal"
+    """Toggle between Vim and Normal editing modes.
 
-    # Check for editorMode in settings (handle both camelCase and snake_case)
-    if isinstance(effective_settings, dict):
-        editor_config = effective_settings.get("editorMode") or effective_settings.get("editor_mode", {})
-        if isinstance(editor_config, dict):
-            current_mode = editor_config.get("mode", "normal")
-        elif isinstance(editor_config, str):
-            current_mode = editor_config
+    Backed by the vim service, which persists to ~/.claude/vim.json and
+    publishes mode changes to the TUI state store.
 
-    # Handle backward compatibility - treat 'emacs' as 'normal'
-    if current_mode == "emacs":
-        current_mode = "normal"
+    Usage:
+        /vim           Toggle vim mode on/off
+        /vim on        Enable vim mode
+        /vim off       Disable vim mode
+        /vim status    Show the current vim status
+    """
+    from py_claw.services.vim import (
+        format_vim_text,
+        get_vim_info,
+        get_vim_status_for_tui,
+        is_vim_enabled,
+        toggle_vim_mode,
+    )
 
-    # Toggle mode
-    new_mode = "vim" if current_mode == "normal" else "normal"
+    arg = (arguments or "").strip().lower()
 
-    # Note: Persisting editor mode would require updating settings
-    # For now, we just report the current toggle action
-    if new_mode == "vim":
-        return (
-            "Editor mode set to vim. "
-            "Use Escape key to toggle between INSERT and NORMAL modes.\n"
-            "(Note: Vim mode persistence requires settings implementation)"
-        )
-    else:
-        return (
-            "Editor mode set to normal. "
-            "Using standard (readline) keyboard bindings.\n"
-            "(Note: Normal mode persistence requires settings implementation)"
-        )
+    if arg in ("", "toggle"):
+        return format_vim_text(toggle_vim_mode())
+
+    if arg == "on":
+        # Idempotent: report the current state when already enabled.
+        return format_vim_text(get_vim_info() if is_vim_enabled() else toggle_vim_mode())
+
+    if arg == "off":
+        # Idempotent: report the current state when already disabled.
+        return format_vim_text(get_vim_info() if not is_vim_enabled() else toggle_vim_mode())
+
+    if arg in ("status", "show"):
+        status = get_vim_status_for_tui()
+        lines = [
+            "Vim status:",
+            f"  enabled: {'yes' if status['vim_enabled'] else 'no'}",
+            f"  tui mode: {status['vim_mode']}",
+        ]
+        if status["status_text"]:
+            lines.append(f"  {status['status_text']}")
+        lines.append("")
+        lines.append(get_vim_info().message)
+        return "\n".join(lines)
+
+    return (
+        "Usage: /vim [on|off|status]\n"
+        "  /vim         Toggle vim mode\n"
+        "  /vim on      Enable vim mode\n"
+        "  /vim off     Disable vim mode\n"
+        "  /vim status  Show current vim status"
+    )
 
 
 def _format_install_status_lines(install_status: dict[str, object], channel: str | None, auto_updates: bool | None) -> list[str]:
@@ -4743,18 +4779,6 @@ def _aggregate_sessions(sessions: list[dict]) -> dict:
     return agg
 
 
-# Available themes for terminal UI
-AVAILABLE_THEMES = [
-    "system",    # Follow terminal/system theme
-    "dark",      # Dark theme
-    "light",     # Light theme
-    "night",     # Night theme (high contrast dark)
-    "monokai",   # Monokai theme
-    "solarized", # Solarized theme
-    "dracula",   # Dracula theme
-]
-
-
 def _theme_handler(
     command: CommandDefinition,
     *,
@@ -4766,31 +4790,30 @@ def _theme_handler(
     transcript_size: int,
 ) -> str:
     """Show or change the color theme."""
+    from py_claw.services.theme import service as theme_service
+
     args = arguments.strip()
 
     if not args:
         # Show current theme and available themes
-        current_theme = settings.effective.get("theme") or "system"
+        current_theme = theme_service.get_current_theme_name()
+        themes = theme_service.list_themes()
         lines = ["=== Claude Code Theme ===", ""]
         lines.append(f"Current theme: {current_theme}")
         lines.append("")
         lines.append("Available themes:")
-        for theme_name in AVAILABLE_THEMES:
-            if theme_name == current_theme:
-                lines.append(f"  * {theme_name} (current)")
-            else:
-                lines.append(f"  - {theme_name}")
+        for theme in themes:
+            marker = "*" if theme.name == current_theme else "-"
+            lines.append(f"  {marker} {theme.name}: {theme.description}")
         lines.append("")
         lines.append("Use /theme <name> to change the theme.")
         return "\n".join(lines)
 
-    # Try to set the theme
-    requested_theme = args.lower()
-    if requested_theme in AVAILABLE_THEMES:
-        return f"Theme setting is read-only in this version. Current theme: {settings.effective.get('theme') or 'system'}"
-    else:
-        valid = ", ".join(AVAILABLE_THEMES)
-        return f"Unknown theme: {requested_theme}. Valid themes: {valid}"
+    # Set the theme (persisted by the theme service, read by the TUI)
+    result = theme_service.set_current_theme(args.lower())
+    if not result.success:
+        return result.message
+    return theme_service.format_theme_text(result)
 
 
 def _format_insights(agg: dict, open_browser: bool = False) -> str:
@@ -5206,6 +5229,148 @@ def _plugin_marketplace_handler(service: "PluginService", args: list[str]) -> st
         return f"Unknown marketplace command: {sub}. Use /plugin marketplace <add|list|remove>."
 
 
+def _agents_handler(
+    command: CommandDefinition,
+    *,
+    arguments: str,
+    state: RuntimeState,
+    settings: SettingsLoadResult,
+    registry: CommandRegistry,
+    session_id: str | None,
+    transcript_size: int,
+) -> str:
+    """List and manage active agents (read-only)."""
+    from py_claw.services.agent_registry.built_in import get_builtin_agents
+
+    lines = ["=== Agents ===", ""]
+
+    lines.append("Built-in agents:")
+    for name, agent in sorted(get_builtin_agents().items()):
+        desc = (agent.when_to_use or agent.description or "").strip().replace("\n", " ")
+        if len(desc) > 72:
+            desc = desc[:69] + "..."
+        model = f" (model: {agent.model})" if agent.model else ""
+        lines.append(f"  - {name}{model}: {desc}")
+    lines.append("")
+
+    lines.append("Session agents (initialized this session):")
+    if state.initialized_agents:
+        for name, definition in sorted(state.initialized_agents.items()):
+            model = f" (model: {definition.model})" if definition.model else ""
+            lines.append(f"  - {name}{model}: {definition.description}")
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    lines.append("Running agent tasks:")
+    agent_sessions = state.task_runtime.list_agent_sessions()
+    if agent_sessions:
+        for info in agent_sessions:
+            try:
+                task = state.task_runtime.get(str(info["task_id"]))
+                status = task.status
+            except Exception:
+                status = "unknown"
+            team = f" [team: {info['teamName']}]" if info.get("teamName") else ""
+            lines.append(f"  - {info['agentType']} (#{info['task_id']}, {status}){team}: {info['description']}")
+    else:
+        lines.append("  (none)")
+
+    return "\n".join(lines)
+
+
+def _team_handler(
+    command: CommandDefinition,
+    *,
+    arguments: str,
+    state: RuntimeState,
+    settings: SettingsLoadResult,
+    registry: CommandRegistry,
+    session_id: str | None,
+    transcript_size: int,
+) -> str:
+    """Manage agent teams and team members."""
+    parts = arguments.strip().split()
+    sub = parts[0].lower() if parts else "list"
+
+    if sub != "list":
+        return (
+            f"Unknown or unimplemented team action: {sub}\n"
+            "Supported: /team list\n"
+            "(team create/delete/add/remove are planned for a later release)"
+        )
+
+    teams = state.task_runtime.list_teams()
+    if not teams:
+        return "No teams found."
+
+    lines = ["=== Teams ===", ""]
+    for team in teams:
+        suffix = f" — {team.description}" if team.description else ""
+        lines.append(f"- {team.team_name}{suffix}")
+        member_ids = sorted(team.member_agent_ids)
+        member_names = sorted(team.member_names)
+        shown = member_names or member_ids
+        lines.append(f"    members: {', '.join(shown) if shown else '(none)'}")
+        if team.leader_agent_id:
+            lines.append(f"    leader: {team.leader_agent_id}")
+    lines.append("")
+    lines.append(
+        "Note: teammates listed here may not have started running yet — "
+        "teammate execution lands in a later release."
+    )
+    return "\n".join(lines)
+
+
+def _desktop_handler(
+    command: CommandDefinition,
+    *,
+    arguments: str,
+    state: RuntimeState,
+    settings: SettingsLoadResult,
+    registry: CommandRegistry,
+    session_id: str | None,
+    transcript_size: int,
+) -> str:
+    """Interact with the Claude Desktop application."""
+    from py_claw.services.desktop_deep_link import (
+        get_desktop_install_status,
+        get_download_url,
+    )
+
+    parts = arguments.strip().split()
+    action = parts[0].lower() if parts else "status"
+
+    if action == "status":
+        status = get_desktop_install_status()
+        lines = ["=== Claude Desktop ===", ""]
+        lines.append(f"Status: {status.status}")
+        if status.version:
+            lines.append(f"Version: {status.version}")
+        if status.status == "not-installed":
+            lines.append("")
+            lines.append(f"Install with /desktop install (downloads from {get_download_url()})")
+        elif status.status == "version-too-old":
+            lines.append("")
+            lines.append("A newer version is required — run /desktop install to update.")
+        else:
+            lines.append("Claude Desktop is ready to receive CLI sessions.")
+        return "\n".join(lines)
+
+    if action == "install":
+        url = get_download_url()
+        try:
+            import webbrowser
+
+            opened = webbrowser.open(url)
+        except Exception:
+            opened = False
+        note = "Opened the download page in your browser." if opened else "Could not open a browser automatically."
+        return f"{note}\nDownload: {url}"
+
+    return "Usage: /desktop [status|install]"
+
+
 _LOCAL_COMMAND_HANDLERS: dict[str, object] = {
     "help": _help_handler,
     "status": _status_handler,
@@ -5213,6 +5378,9 @@ _LOCAL_COMMAND_HANDLERS: dict[str, object] = {
     "hooks": _hooks_handler,
     "ide": _ide_handler,
     "tasks": _tasks_handler,
+    "agents": _agents_handler,
+    "team": _team_handler,
+    "desktop": _desktop_handler,
     "mcp": _mcp_handler,
     "files": _files_handler,
     "memory": _memory_handler,
@@ -5265,20 +5433,17 @@ _LOCAL_COMMAND_HANDLERS: dict[str, object] = {
     "terminal-setup": _terminal_setup_handler,
     "theme": _theme_handler,
     "chrome": _chrome_handler,
-    "color": _color_handler,
     "mobile": _mobile_handler,
     "insights": _insights_handler,
     "add-dir": _add_dir_handler,
     "bridge": _bridge_handler,
     "sessions": _sessions_handler,
-    "break-cache": _break_cache_handler,
     "heapdump": _heapdump_handler,
     "sandbox-toggle": _sandbox_toggle_handler,
     "security-review": _security_review_handler,
     "teleport": _teleport_handler,
     "brief": _brief_handler,
     "ultraplan": _ultraplan_handler,
-    "upgrade": _upgrade_handler,
     "voice": _voice_handler,
     # M105, M107, M110, M112 - newly implemented commands
     "pr-comments": _pr_comments_handler,
@@ -5288,13 +5453,11 @@ _LOCAL_COMMAND_HANDLERS: dict[str, object] = {
     # Additional low-priority parity commands
     "issue": _issue_handler,
     "debug-tool-call": _debug_tool_call_handler,
-    "perf-issue": _perf_issue_handler,
     "mock-limits": _mock_limits_handler,
     "oauth-refresh": _oauth_refresh_handler,
     "remote-setup": _remote_setup_handler,
     "thinkback-play": _thinkback_play_handler,
     "bridge-kick": _bridge_kick_handler,
-    "agents-platform": _agents_platform_handler,
     "ant-trace": _ant_trace_handler,
     "ctx_viz": _ctx_viz_handler,
 }

@@ -20,7 +20,7 @@ class TUIState:
     """TUI-specific state fields for Textual REPL UI."""
     # Prompt state
     prompt_mode: str = "normal"  # "normal" | "plan" | "auto" | "bypass"
-    vim_mode: str = "INSERT"   # "INSERT" | "NORMAL" | "VISUAL"
+    vim_mode: str = "INSERT"   # "OFF" | "INSERT" | "NORMAL" | "VISUAL" | "COMMAND"
     prompt_value: str = ""
 
     # Suggestion state

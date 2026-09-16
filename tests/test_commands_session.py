@@ -640,3 +640,121 @@ class TestSessionCommandIntegration:
             with patch.dict('os.environ', {}, clear=True):
                 url = _get_remote_session_url(state)
                 assert url is None
+
+
+class TestBatch4CommandFixes:
+    """Regression tests for batch #4 P0 crash/bug fixes and hidden commands."""
+
+    def test_compact_handler_no_attribute_error_shows_real_config(self):
+        """P0-1: /compact must not raise AttributeError.
+
+        The handler is now fully wired (it compacts the real transcript via
+        the compact service), so with a mock runtime that exposes no usable
+        transcript it returns a friendly refusal instead of crashing.
+        """
+        from py_claw.commands import CommandDefinition, _compact_handler
+
+        result = _compact_handler(
+            command=CommandDefinition(name="compact", description="Compact"),
+            arguments="",
+            state=MagicMock(),
+            settings=MagicMock(),
+            registry=MagicMock(),
+            session_id=None,
+            transcript_size=5,
+        )
+        # A MagicMock transcript has length 0 -> friendly refusal, no crash.
+        assert "Not enough conversation history to compact" in result
+
+    def test_pr_comments_via_registry_does_not_crash(self):
+        """P0-2: /pr-comments <n> routes to the local gh handler (no KeyError/NameError)."""
+        from py_claw.commands import CommandRegistry
+        from unittest.mock import patch
+
+        registry = CommandRegistry.build(skills=[], include_builtins=True)
+        state = MagicMock()
+        state.cwd = "/tmp"
+        with patch("shutil.which", return_value=None):
+            result = registry.execute(
+                "pr-comments", arguments="123", state=state, settings=MagicMock()
+            )
+        # Local command (not a prompt expansion), friendly gh error, no crash
+        assert result.should_query is False
+        assert result.output_text is not None
+        assert "gh" in result.output_text
+
+    def test_btw_output_has_no_leaked_comment_banner(self):
+        """P0-4: /btw output must not contain the leaked source comment banner."""
+        from py_claw.commands import CommandDefinition, _btw_handler
+
+        result = _btw_handler(
+            command=CommandDefinition(name="btw", description="btw"),
+            arguments="hello",
+            state=MagicMock(),
+            settings=MagicMock(),
+            registry=MagicMock(),
+            session_id=None,
+            transcript_size=0,
+        )
+        assert result == "BTW noted: hello\nThis will be prepended to your next message."
+        assert "M112" not in result
+        assert "# ----" not in result
+
+    def test_rate_limit_options_uses_real_newlines(self):
+        """P0-3: /rate-limit-options output uses real newlines, not literal \\n."""
+        from py_claw.commands import CommandDefinition, _rate_limit_options_handler
+
+        result = _rate_limit_options_handler(
+            command=CommandDefinition(name="rate-limit-options", description="rl"),
+            arguments="",
+            state=MagicMock(),
+            settings=MagicMock(),
+            registry=MagicMock(),
+            session_id=None,
+            transcript_size=0,
+        )
+        assert "=== Rate Limit Options ===" in result
+        assert "\n" in result
+        assert "\\n" not in result
+
+    def test_remote_env_uses_real_newlines(self):
+        """P0-3: /remote-env output uses real newlines, not literal \\n."""
+        from py_claw.commands import CommandDefinition, _remote_env_handler
+
+        settings = MagicMock()
+        settings.effective = {}
+        result = _remote_env_handler(
+            command=CommandDefinition(name="remote-env", description="remote-env"),
+            arguments="",
+            state=MagicMock(),
+            settings=settings,
+            registry=MagicMock(),
+            session_id=None,
+            transcript_size=0,
+        )
+        assert "No remote environments configured." in result
+        assert "\n" in result
+        assert "\\n" not in result
+
+    def test_help_filters_non_user_invocable_commands(self):
+        """P0-5 + HIDE: /help must not list user_invocable=False commands."""
+        from py_claw.commands import CommandRegistry
+
+        registry = CommandRegistry.build(skills=[], include_builtins=True)
+        result = registry.execute("help", arguments="", state=MagicMock(), settings=MagicMock())
+        text = result.output_text
+        assert text.startswith("Available slash commands:")
+
+        names = set()
+        for line in text.splitlines():
+            if line.startswith("- /"):
+                rest = line[len("- /"):]
+                names.add(rest.split(" ", 1)[0])
+
+        hidden = {
+            "fast", "sandbox-toggle", "output-style", "effort",
+            "teleport", "ultraplan", "bridge-kick", "ant-trace",
+            "reset-limits", "summary",
+        }
+        assert not (hidden & names), f"hidden commands leaked into /help: {hidden & names}"
+        assert "compact" in names

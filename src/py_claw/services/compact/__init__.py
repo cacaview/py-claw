@@ -25,6 +25,18 @@ from .compressor import (
     truncate_head_for_ptl_retry,
     build_post_compact_messages,
 )
+from .message_compat import (
+    CompactMessage,
+    build_compact_transcript,
+    ensure_compact_message,
+    estimate_message_tokens,
+    normalize_compact_messages,
+)
+from .manual_compact import (
+    AnthropicSummaryAdapter,
+    build_compact_api_client,
+    run_manual_compact,
+)
 from .auto_trigger import (
     auto_compact_if_needed,
     compute_effective_threshold,
@@ -82,6 +94,15 @@ __all__ = [
     "strip_images_from_messages",
     "truncate_head_for_ptl_retry",
     "build_post_compact_messages",
+    # Message compat / manual compact
+    "CompactMessage",
+    "build_compact_transcript",
+    "ensure_compact_message",
+    "estimate_message_tokens",
+    "normalize_compact_messages",
+    "AnthropicSummaryAdapter",
+    "build_compact_api_client",
+    "run_manual_compact",
     # Auto trigger
     "_context_window_for_model",
     "MODEL_CONTEXT_WINDOWS",

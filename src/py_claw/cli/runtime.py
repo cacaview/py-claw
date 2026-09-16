@@ -45,6 +45,7 @@ class RuntimeState:
     home_dir: str | None = None
     permission_mode: PermissionMode = "default"
     model: str | None = None
+    agent_name: str | None = None
     max_thinking_tokens: int | None = None
     include_partial_messages: bool = False
     interrupt_event: threading.Event = field(default_factory=threading.Event)

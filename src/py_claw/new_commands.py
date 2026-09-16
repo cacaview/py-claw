@@ -358,34 +358,6 @@ def _debug_tool_call_handler(
     return "\n".join(lines)
 
 
-def _perf_issue_handler(
-    command,
-    *,
-    arguments: str,
-    state,
-    settings,
-    registry,
-    session_id: str | None,
-    transcript_size: int,
-) -> str:
-    """Perf issue command - diagnose performance problems."""
-    if not arguments.strip():
-        return """Performance Issue Diagnostics
-
-This command analyzes performance problems in your session.
-
-Usage: /perf-issue [area]
-
-Areas:
-- session     - Session-level performance issues
-- tools       - Tool execution timing
-- api         - API response times
-- memory      - Memory usage analysis
-
-Example: /perf-issue tools"""
-    return f"Performance issue analysis: {arguments}\n\nThis feature analyzes session performance."
-
-
 def _mock_limits_handler(
     command,
     *,
@@ -397,7 +369,10 @@ def _mock_limits_handler(
     transcript_size: int,
 ) -> str:
     """Mock limits command - simulate rate limit errors for testing."""
-    if not arguments.strip():
+    from py_claw.services import rate_limits_mocking as mocking
+
+    parts = arguments.strip().split()
+    if not parts:
         return """Mock Limits (Testing Only)
 
 Usage: /mock-limits <type> [duration]
@@ -407,8 +382,51 @@ Types:
 - token_limit   - Simulate token limit error
 - timeout       - Simulate timeout error
 
-Example: /mock-limits rate_limit 60"""
-    return f"Mock limits: {arguments}\n\nThis is for testing purposes only."
+Example: /mock-limits rate_limit 60
+Disable: /mock-limits off"""
+
+    action = parts[0].lower()
+
+    if action in ("off", "reset", "clear"):
+        mocking.set_mock_limits_active(False)
+        mocking.reset_mock_limits()
+        return "Mock rate limits disabled."
+
+    if action not in ("rate_limit", "token_limit", "timeout"):
+        return (
+            f"Unknown type: {parts[0]}\n"
+            "Usage: /mock-limits <rate_limit|token_limit|timeout> [duration] | /mock-limits off"
+        )
+
+    duration = 60
+    if len(parts) > 1:
+        try:
+            duration = int(float(parts[1]))
+        except ValueError:
+            return f"Invalid duration: {parts[1]} (expected seconds, e.g. 60)"
+        if duration <= 0:
+            return "Duration must be a positive number of seconds."
+
+    import datetime
+    import time
+
+    mocking.set_mock_limits_active(True)
+    mocking.set_mock_headers(
+        {
+            "anthropic-ratelimit-unified-status": "rejected",
+            "anthropic-ratelimit-unified-reset": str(duration),
+        }
+    )
+    expires_at = datetime.datetime.fromtimestamp(time.time() + duration).strftime("%H:%M:%S")
+
+    lines = [
+        f"Mock {action} rate limiting active for {duration}s (expires at {expires_at}).",
+        "The next model request will be answered with a mocked 429 rate-limit response.",
+        "Run /mock-limits off to disable early.",
+        "",
+        "Note: mock limits are processed only when USER_TYPE=ant (testing only).",
+    ]
+    return "\n".join(lines)
 
 
 def _build_oauth_status(service) -> str:
@@ -563,16 +581,28 @@ def _thinkback_play_handler(
     session_id: str | None,
     transcript_size: int,
 ) -> str:
-    """Thinkback play command - play back think-back history."""
-    if not arguments.strip():
-        return """Think-Back Playback
+    """Thinkback play command - play back the think-back animation."""
+    import asyncio
 
-Usage: /thinkback-play [session-id]
+    from py_claw.services.thinkback_play.service import play
 
-Play back the think-back history from a previous session.
+    try:
+        result = asyncio.run(play())
+    except Exception as exc:
+        return f"Failed to play thinkback animation: {exc}"
 
-Example: /thinkback-play abc123"""
-    return f"Thinkback playback: {arguments}\n\nThis feature plays back session think history."
+    if not result.success:
+        # When the plugin is missing, point the user at the install guidance.
+        if "not installed" in result.message:
+            try:
+                from py_claw.commands import _thinkback_not_installed_message
+
+                return _thinkback_not_installed_message()
+            except ImportError:
+                pass
+        return result.message
+
+    return result.message
 
 
 def _bridge_kick_handler(
@@ -587,31 +617,6 @@ def _bridge_kick_handler(
 ) -> str:
     """Bridge kick command - inject bridge fault state (Ant internal)."""
     return "Bridge kick command is for internal use only."
-
-
-def _agents_platform_handler(
-    command,
-    *,
-    arguments: str,
-    state,
-    settings,
-    registry,
-    session_id: str | None,
-    transcript_size: int,
-) -> str:
-    """Agents platform command - manage agents platform."""
-    if not arguments.strip():
-        return """Agents Platform
-
-Usage: /agents-platform [action]
-
-Actions:
-- status    - Show platform status
-- list      - List active agents
-- create    - Create new agent
-
-Example: /agents-platform status"""
-    return f"Agents platform: {arguments}\n\nThis feature manages the agents platform."
 
 
 def _ant_trace_handler(

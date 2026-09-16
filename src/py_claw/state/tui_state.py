@@ -82,6 +82,15 @@ class TUIStateSubscriber:
 # ─── Store update helpers ────────────────────────────────────────────────────
 
 
+def get_tui_state_snapshot() -> TUIStateSnapshot:
+    """Get the current TUI state snapshot from the global store.
+
+    Returns:
+        TUIStateSnapshot reflecting the global store's TUI state
+    """
+    return _get_tui_snapshot(get_global_store().get_state())
+
+
 def update_tui_prompt_mode(mode: str) -> None:
     """Update the prompt mode in the global store."""
     store = get_global_store()

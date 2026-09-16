@@ -10,6 +10,7 @@ from uuid import uuid4
 from py_claw.commands import CommandExecutionResult
 from py_claw.permissions.engine import PermissionEngine
 from py_claw.query.backend import (
+    ApiRequestError,
     BackendChunk,
     BackendToolCall,
     BackendTurnResult,
@@ -135,6 +136,30 @@ class QueryTurnFailure(Exception):
         self.partial_outputs = list(partial_outputs or [])
 
 
+def _mock_rate_limit_failure() -> "QueryTurnFailure | None":
+    """Return a QueryTurnFailure when /mock-limits rate limiting is active.
+
+    Only consulted on the turn-execution path; when mock limits are inactive
+    (the default) this is a couple of dict/global lookups and returns None,
+    so the real request path is untouched.
+    """
+    from py_claw.services.rate_limits_mocking import (
+        get_mock_headerless_429_message,
+        get_mock_headers,
+        should_process_mock_limits,
+    )
+
+    if not should_process_mock_limits():
+        return None
+    message = get_mock_headerless_429_message() or "Rate limit exceeded (mocked via /mock-limits)"
+    headers = get_mock_headers()
+    if headers:
+        reset = headers.get("anthropic-ratelimit-unified-reset")
+        if reset:
+            message += f"; resets in {reset}s"
+    return QueryTurnFailure(ApiRequestError("rate_limit", message, 429))
+
+
 # Type for streaming turn output: either an intermediate partial message,
 # or the final (ExecutedTurn, tool_outputs) tuple.
 StreamingTurnOutput = SDKPartialAssistantMessage | tuple[ExecutedTurn, list[StdoutMessage]]
@@ -208,6 +233,9 @@ class BackendTurnExecutor:
 
     def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
         prepared = self._apply_runtime_defaults(prepared, context)
+        mock_failure = _mock_rate_limit_failure()
+        if mock_failure is not None:
+            raise mock_failure
         result = self._backend.run_turn(prepared, context)
         return self._to_executed_turn(result)
 
@@ -220,6 +248,9 @@ class BackendTurnExecutor:
         Falls back to non-streaming if backend does not support streaming.
         """
         prepared = self._apply_runtime_defaults(prepared, context)
+        mock_failure = _mock_rate_limit_failure()
+        if mock_failure is not None:
+            raise mock_failure
         if isinstance(self._backend, StreamingQueryBackend):
             chunks: list[BackendChunk] = []
             for chunk in self._backend.run_turn_streaming(prepared, context):
@@ -590,6 +621,42 @@ class QueryRuntime:
         if self._session_id is not None:
             self.save_session_state(self._session_id)
 
+    #: Prefix for pre-compact transcript snapshots (in-memory rollback).
+    _COMPACT_SNAPSHOT_PREFIX = "compact-snapshot:"
+
+    def save_compact_snapshot(self, session_id: str) -> str:
+        """Snapshot the current transcript before a destructive compact.
+
+        Reuses the in-memory saved-session store so a manual /compact can be
+        rolled back via ``restore_compact_snapshot``. Returns the snapshot id.
+        """
+        snapshot_id = f"{self._COMPACT_SNAPSHOT_PREFIX}{session_id}"
+        self._saved_sessions[snapshot_id] = SavedSessionState(
+            transcript=list(self._transcript),
+            turn_count=self._turn_count,
+        )
+        return snapshot_id
+
+    def discard_compact_snapshot(self, session_id: str) -> None:
+        """Drop the pre-compact snapshot (used when compaction fails)."""
+        self._saved_sessions.pop(f"{self._COMPACT_SNAPSHOT_PREFIX}{session_id}", None)
+
+    def restore_compact_snapshot(self, session_id: str) -> tuple[bool, str]:
+        """Restore the pre-compact transcript snapshot, if one exists.
+
+        Writes the snapshot back through the same ``replace_transcript``
+        path used for other transcript replacements.
+        """
+        snapshot_id = f"{self._COMPACT_SNAPSHOT_PREFIX}{session_id}"
+        saved = self._saved_sessions.get(snapshot_id)
+        if saved is None:
+            return False, "no pre-compact snapshot available (run /compact first)"
+        count = len(saved.transcript)
+        self.replace_transcript(saved.transcript)
+        self._turn_count = saved.turn_count
+        self._saved_sessions.pop(snapshot_id, None)
+        return True, f"Rolled back compact: restored {count} messages"
+
     def saved_session_ids(self) -> list[str]:
         return sorted(self._saved_sessions)
 
@@ -683,6 +750,48 @@ class QueryRuntime:
         if prompt_suggestion is not None:
             outputs.append(prompt_suggestion)
         return outputs
+
+    def _maybe_run_advisor_review(self, prepared: PreparedTurn, executed: ExecutedTurn) -> ExecutedTurn:
+        """Attach the advisor review to the final response, if configured.
+
+        No-op (zero overhead, no extra API call) when ``state.advisor_model``
+        is unset, or when the turn did not end with a normal model response.
+        When an advisor is configured, one short review of this turn is run
+        with the advisor model and appended after the main response. The
+        review is best-effort (hard timeout, silent skip on any failure), so
+        the correctness and completeness of the main response is never
+        affected by it.
+        """
+        if not self.state.advisor_model or executed.stop_reason != "end_turn":
+            return executed
+        from py_claw.query.backend import PlaceholderQueryBackend
+
+        backend = self.state.query_backend
+        if backend is None or isinstance(backend, PlaceholderQueryBackend):
+            return executed
+
+        from py_claw.services.advisor import format_review_block, run_review
+
+        review = run_review(
+            backend,
+            advisor_model=self.state.advisor_model,
+            query_text=prepared.query_text or "",
+            answer_text=executed.assistant_text or "",
+            session_id=self._session_id or "",
+            state=self.state,
+        )
+        if not review:
+            return executed
+        return ExecutedTurn(
+            assistant_text=f"{executed.assistant_text}\n\n{format_review_block(review)}",
+            stop_reason=executed.stop_reason,
+            usage=executed.usage,
+            model_usage=executed.model_usage,
+            duration_api_ms=executed.duration_api_ms,
+            total_cost_usd=executed.total_cost_usd,
+            tool_calls=executed.tool_calls,
+            prompt_suggestion=executed.prompt_suggestion,
+        )
 
     def _finalize_outputs(
         self,
@@ -1309,6 +1418,7 @@ class QueryRuntime:
                     else:
                         # Final (ExecutedTurn, tool_outputs)
                         executed, tool_outputs = item
+                        executed = self._maybe_run_advisor_review(prepared, executed)
                         yield from self._build_assistant_outputs(
                             session_id, executed, started, tool_outputs=tool_outputs
                         )

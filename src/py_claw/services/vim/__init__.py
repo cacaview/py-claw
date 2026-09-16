@@ -14,6 +14,8 @@ from py_claw.services.vim.service import (
     get_vim_status_for_tui,
     is_vim_active_in_tui,
     is_vim_enabled,
+    load_vim_config,
+    save_vim_config,
     set_vim_mode,
     toggle_vim_mode,
 )
@@ -30,6 +32,8 @@ __all__ = [
     "get_tui_vim_mode",
     "is_vim_active_in_tui",
     "get_vim_status_for_tui",
+    "load_vim_config",
+    "save_vim_config",
     "VimMode",
     "VimConfig",
     "VimResult",

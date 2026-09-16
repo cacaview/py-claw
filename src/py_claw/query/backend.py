@@ -457,8 +457,10 @@ class ApiQueryBackend:
         self._timeout_seconds = timeout_seconds
 
     def run_turn(self, prepared: PreparedTurn, context: QueryTurnContext) -> BackendTurnResult:
+        # Respect a per-turn model override (e.g. the advisor model); the
+        # constructor model is the default, mirroring AnthropicQueryBackend.
         return _api_request(
-            prepared, context, self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools,
+            prepared, context, prepared.model or self._model, self._max_output_tokens, self._api_key, self._api_url, self._tools,
             temperature=self._temperature, top_p=self._top_p, timeout_seconds=self._timeout_seconds,
         )
 
