@@ -84,9 +84,6 @@ state/
 | `ComputerUseMcpState` | Computer Use MCP 状态 |
 | `TungstenSessionState` | Tungsten/tmux 会话状态 |
 | `TungstenLastCommandState` | Tungsten 上次命令状态 |
-| `BuddyNotification` | Buddy 通知结构 |
-| `NotificationTrigger` | Buddy 触发位置结构 |
-| `BuddyNotificationManager` | Buddy 通知管理器 |
 | `TUIState` | TUI 状态（prompt_mode/vim_mode/suggestions/queued_prompts/stashed_prompt/pasted_content/narrow_terminal） |
 | `create_default_app_state()` | 创建默认状态 |
 

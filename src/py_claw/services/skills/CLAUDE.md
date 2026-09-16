@@ -67,7 +67,6 @@
 
 ### 与子服务的关系
 
-- `skill_discovery/` — 动态/条件 skill 发现
 - `skill_manager/` — 内置 skill 注册与执行
 - `skill_search/` — 搜索与缓存
 
@@ -99,7 +98,6 @@
 | `remember` | 记忆技能 (内存审查) |
 | `stuck` | "当卡住时"技能 (进程诊断) |
 | `verify` | 代码验证技能 |
-| `schedule` | 远程 Agent 调度 (CCR) |
 | `lorem-ipsum` | Lorem ipsum 文本生成器 |
 | `dream` | 代码可视化/创意分析技能 |
 | `hunter` | Bug追踪/代码质量分析技能 |

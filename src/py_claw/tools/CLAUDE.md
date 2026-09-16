@@ -24,7 +24,7 @@
 
 ## 对外接口
 
-默认内置工具（32 个）：
+默认内置工具（30 个）：
 
 | 工具 | 文件 | 说明 |
 |---|---|---|
@@ -53,8 +53,6 @@
 | `ListMcpResources` | `mcp_resource_tools.py` | 列出 MCP 资源 |
 | `ReadMcpResource` | `mcp_resource_tools.py` | 读取 MCP 资源 |
 | `Skill` | `skill_tool.py` | Skill 执行（inline/fork） |
-| `DiscoverSkills` | `discover_skills_tool.py` | 技能发现 |
-| `GetSkillDetails` | `discover_skills_tool.py` | 获取技能详情 |
 | `WebFetch` | `web_fetch_tool.py` | Web 内容抓取 |
 | `WebSearch` | `web_search_tool.py` + `web_search_backends.py` | 多引擎联网搜索（Bing/DuckDuckGo/Baidu，免 API key） |
 | `Config` | `config_tool.py` | 配置操作 |

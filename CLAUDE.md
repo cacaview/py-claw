@@ -21,7 +21,6 @@
   - `tools/` 已实现内置工具注册、权限前置和本地执行。
   - `mcp/` 负责动态 MCP server 状态快照，不做真实连接。
   - `hooks/` 同时包含 hook schema 与命令 hook 执行器。
-  - `services/remote/` 负责 CCR 远程会话管理（RemoteSessionManager、WebSocket、message_adapter、permission_bridge）。
 - `tests/` 使用 pytest 覆盖 CLI、schema、权限、settings、tools、hooks、MCP 等核心行为。
 - `ClaudeCode-main/` 提供上游还原参考，其中：
   - `src/cli/` 是结构化 I/O、remote I/O、transport 层
@@ -144,11 +143,10 @@ graph TD
 | `src/py_claw/permissions` | Python | `engine.py`, `state.py`, `rules.py` | 根测试覆盖 | 权限规则来自 settings | 3/4 | 权限上下文构建与 allow/ask/deny 判定 |
 | `src/py_claw/tools` | Python | `runtime.py`, `local_fs.py`, `local_shell.py` | `tests/test_tools_runtime.py` | 无独立配置 | 4/4 | 内置工具注册、权限前置与本地执行（含 LSPTool） |
 | `src/py_claw/mcp` | Python | `runtime.py` | `tests/test_mcp_runtime.py` | settings 的 `mcp` 段 | 大部分完成 | MCP server 状态快照、stdio/SSE/WebSocket transport |
-| `src/py_claw/services` | Python | 各子模块 | 各子模块测试 | 各子模块配置 | 基本完成 | 运行时服务层（auth/api/log/debug/stats/bash/session_state/cron/cleanup/suggestions/compact/session_memory/oauth/lsp/agent/ide/doctor/model/permissions/telemetry/sandbox/secure_storage/deep_link/file_persistence/native_installer/powershell/remote/worktree/cost_tracker/agent_registry） |
+| `src/py_claw/services` | Python | 各子模块 | 各子模块测试 | 各子模块配置 | 基本完成 | 运行时服务层（auth/api/log/debug/stats/bash/session_state/cron/cleanup/suggestions/compact/session_memory/oauth/lsp/agent/ide/model/permissions/telemetry/deep_link/file_persistence/native_installer/powershell/worktree/cost_tracker/agent_registry） |
 | `src/py_claw/hooks` | Python | `schemas.py`, `runtime.py` | `tests/test_hooks_runtime.py` | settings 的 `hooks` 段 | 2/2 | Hook schema 与命令 hook 运行时 |
 | `src/py_claw/ui` | Python | `textual_app.py` | `tests/test_tui*/**`, `tests/test_tui_textual.py` | textual>=0.50 | ✅ Phase 1-5 完成 + compact layout + shortcut surface | Textual 终端 UI 层（REPL 屏幕、overlay/dialog、设计系统组件） |
 | `src/py_claw/ssh` | Python | `session.py` | 无独立测试 | 无独立配置 | 1/1 | SSH 会话管理 |
-| `src/py_claw/buddy` | Python | `companion.py`, `sprites.py`, `prompt.py` | 无独立测试 | 无独立配置 | 3/3 | Companion sprite 系统、确定性roll、ASCII渲染 |
 | `tests` | Python | `pytest` | 自身 | `tool.pytest.ini_options` | 6/6 | 协议与运行时行为回归（2030 测试） |
 | `ClaudeCode-main` | TypeScript/Bun | `src/dev-entry.ts` | 未系统扫描 | `package.json`, `tsconfig.json` | 已补 `cli/bridge/commands/services/tools/components` 子系统 | 上游还原参考树 |
 | `ClaudeCode-main/src/cli` | TypeScript | `structuredIO.ts`, `remoteIO.ts` | 未见独立测试结论 | transport/env flags | 子系统级已扫 | 协议 I/O、远程 transport、worker 状态同步 |

@@ -10,7 +10,7 @@
 - 结构化输入输出 + SSE/WebSocket transport（`cli/structured_io.py`）
 - settings 加载与校验（`settings/`）
 - 权限规则建模与求值（`permissions/`）
-- 内置工具执行运行时（`tools/`，46+ 个工具）
+- 内置工具执行运行时（`tools/`，50+ 个工具）
 - MCP 状态快照建模（`mcp/`）
 - hook schema 与命令 hook 运行时（`hooks/`）
 - 任务列表与后台 shell 任务运行时（`tasks.py`）
@@ -21,7 +21,6 @@
 - Query runtime 与后端适配（`query/`）
 - 运行时服务（`services/`）
 - SSH 会话管理（`ssh/`）
-- Buddy companion 系统（`buddy/`，deterministic roll、ASCII sprite、prompt 集成）
 
 ## 入口与启动
 
@@ -34,7 +33,6 @@
 - `schemas/control.py`：控制请求/响应 envelope、initialize、get_settings、mcp_status 等
 - `schemas/common.py`：权限结果、Hook 输入/输出、MCP server 模型、SDK message 联合类型、AgentDefinition、SlashCommand 等
 - `tools/runtime.py`：内置工具执行主链路
-- `tools/discover_skills_tool.py`：技能发现工具 (DiscoverSkills, GetSkillDetails)
 - `tasks.py`：任务记录、后台 Bash 进程跟踪、日志输出与 stop/wait 语义
 - `hooks/runtime.py`：命令 hook 调度与权限决策回写（27 个 hook events）
 - `mcp/runtime.py`：MCP server 状态折叠与快照生成、tools/list、tools/call、prompts 方法
@@ -48,7 +46,6 @@
 - `services/api/`：API 类型与客户端
 - `ui/`：Textual 终端 UI 层（Textual 重写 Ink/React 组件，Phase 1-4 完成）
 - `ssh/`：SSH 会话管理（SSHSessionManager、create_ssh_session）
-- `buddy/`：Companion 系统（roll_companion、render_sprite、get_companion_intro_attachment）
 - `commands.py`：90+ 个 slash commands 实现（含 install-github-app、remote-env、sandbox-toggle 等）
 - `commands/init_verifiers.py`：`/init-verifiers` 命令实现
 - `cli/main.py`：`main()` 作为包脚本入口
@@ -91,7 +88,7 @@
 还没有。当前 `__init__.py` 只公开 `__version__`，项目主要使用方式仍是 CLI/运行时，而不是顶层 import API。
 
 ### 这里是否已经实现完整工具执行？
-已实现 46+ 个内置工具，包括 Read/Edit/Write/Glob/Grep/Bash/PowerShell/Task*/LSP/Skill/Agent/McpAuth/Tungsten/OverflowTest/Monitor 等，但仍是轻量运行时。
+已实现 50+ 个内置工具，包括 Read/Edit/Write/Glob/Grep/Bash/PowerShell/Task*/LSP/Skill/Agent/Monitor/Workflow/WebBrowser 等，但仍是轻量运行时。
 
 ### MCP 是否已经能真实连外部 server？
 `mcp/runtime.py` 已实现 stdio、SSE、WebSocket transport，支持 `list_tools()`、`call_tool()`、`list_prompts()` 等方法。SDK/claudeai-proxy transport 待实现。
@@ -122,7 +119,6 @@
 - `tools/lsp_tool.py`
 - `tools/agent_tools.py`
 - `tools/skill_tool.py`
-- `tools/discover_skills_tool.py`
 - `hooks/runtime.py`
 - `mcp/runtime.py`
 - `schemas/control.py`
@@ -158,11 +154,6 @@
 - `ui/textual_app.py`
 - `ssh/__init__.py`
 - `ssh/session.py`
-- `buddy/__init__.py`
-- `buddy/types.py`
-- `buddy/companion.py`
-- `buddy/sprites.py`
-- `buddy/prompt.py`
 
 ## 变更记录 (Changelog)
 

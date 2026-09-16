@@ -22,8 +22,10 @@
 - `QueryBackend`
 - `BackendTurnResult`
 - `BackendToolCall`
-- `PlaceholderQueryBackend`
+- `PlaceholderQueryBackend`（未配置后端时的回退）
 - `SdkUrlQueryBackend`
+- `AnthropicQueryBackend`（Anthropic 协议，真实模型调用）
+- `ApiQueryBackend`（OpenAI 兼容，SSE 流式，真实模型调用）
 - `BackendChunk`（streaming turn chunk type: text_delta / stop_reason）
 - `BackendTurnResult` 新增 `total_cost_usd` 字段用于真实 cost 跟踪
 
@@ -56,7 +58,7 @@
 
 - 依赖 `py_claw.commands`、`py_claw.schemas.common`、`py_claw.schemas.control`、`py_claw.settings.loader`、`py_claw.tools.base`
 - 该层不直接负责 CLI 参数解析，而是承接已准备好的 turn context
-- 当前包含 placeholder backend / executor 路径，适合作为未来真实模型接入的接缝
+- backend.py 现已提供真实模型后端（`AnthropicQueryBackend` / `ApiQueryBackend`（OpenAI 兼容，SSE 流式）/ `SdkUrlQueryBackend`），`cli/main.py` 依据配置选择后端并接入完整工具循环；`PlaceholderQueryBackend` / `PlaceholderTurnExecutor` 仅作为未配置后端时的回退路径保留
 
 ## 数据模型
 
