@@ -4,16 +4,21 @@ import argparse
 import json
 import logging
 import sys
-from typing import Sequence, TextIO
+import time
+from typing import Any, Sequence, TextIO
 
 from py_claw import __version__
 from py_claw.cli.control import ControlRuntime
-from py_claw.cli.runtime import RuntimeState
+from py_claw.cli.runtime import HostPermissionChannel, RuntimeState
 from py_claw.cli.structured_io import StructuredIO, StructuredIOError
 from py_claw.config import load_config
 from py_claw.query import QueryRuntime, SdkUrlQueryBackend
 from py_claw.query.backend import ApiQueryBackend
-from py_claw.schemas.control import SDKControlRequestEnvelope, SDKControlResponseEnvelope
+from py_claw.schemas.control import (
+    SDKControlPermissionRequest,
+    SDKControlRequestEnvelope,
+    SDKControlResponseEnvelope,
+)
 from py_claw.schemas.common import SDKUserMessage
 from py_claw.ui.textual_app import run_textual_ui
 
@@ -175,36 +180,188 @@ def _run_stream_json(args: argparse.Namespace, stdin: TextIO, stdout: TextIO) ->
     state = _build_state(args)
     control_runtime = ControlRuntime(state)
     query_runtime = QueryRuntime(state)
+
+    # A stream-json host is the only non-TUI surface that can answer
+    # ``can_use_tool`` control requests, so the query engine's ask path is
+    # gated on installing this channel. Print mode and the TUI leave it None.
+    state.host_permission_channel = _StreamJsonPermissionChannel(structured_io, stdin, stdout)
     if args.prompt:
         structured_io.prepend_user_message(args.prompt)
 
-    for message in structured_io.iter_messages(stdin):
-        if isinstance(message, SDKControlRequestEnvelope):
-            try:
-                response = control_runtime.handle_request(message.request)
-            except StructuredIOError as exc:
-                _write_control_response(
-                    structured_io,
-                    stdout,
-                    request_id=message.request_id,
-                    error=str(exc),
-                )
-            else:
-                _write_control_response(
-                    structured_io,
-                    stdout,
-                    request_id=message.request_id,
-                    response=response,
-                )
-            continue
+    try:
+        for message in structured_io.iter_messages(stdin):
+            if isinstance(message, SDKControlRequestEnvelope):
+                try:
+                    response = control_runtime.handle_request(message.request)
+                except StructuredIOError as exc:
+                    _write_control_response(
+                        structured_io,
+                        stdout,
+                        request_id=message.request_id,
+                        error=str(exc),
+                    )
+                else:
+                    _write_control_response(
+                        structured_io,
+                        stdout,
+                        request_id=message.request_id,
+                        response=response,
+                    )
+                continue
 
-        if getattr(message, "type", None) != "user":
-            continue
+            if getattr(message, "type", None) != "user":
+                continue
 
-        for outbound in query_runtime.handle_user_message(message):
-            stdout.write(structured_io.write(outbound))
-            stdout.flush()
+            for outbound in query_runtime.handle_user_message(message):
+                stdout.write(structured_io.write(outbound))
+                stdout.flush()
+    finally:
+        # iter_messages drains stdin to EOF; mark the stream closed so a
+        # can_use_tool request still in flight while the host disconnects
+        # fails fast instead of a blocked read() against a closed stdin.
+        structured_io.close_input()
+        state.host_permission_channel = None
+        state.query_runtime = None
     return 0
+
+
+class _HostPermissionResponse:
+    """Host permission response carrying the fields the engine inspects."""
+
+    def __init__(
+        self,
+        behavior: str | None = None,
+        updated_input: dict[str, Any] | None = None,
+        deny_message: str | None = None,
+    ) -> None:
+        self.behavior = behavior
+        self.updatedInput = updated_input
+        self.message = deny_message
+
+
+class _StreamJsonPermissionChannel:
+    """Host-side ``can_use_tool`` request/response channel over stdin/stdout.
+
+    ``send`` writes the control request through ``StructuredIO.send_request``
+    — the same request_id round-trip used by every other stream-json request —
+    and flushes it to ``stdout``. ``wait`` blocks reading the host's
+    ``control_response`` line directly from the stream; because the engine runs
+    synchronously inside the main message loop, this is safe and the pending
+    request is still open while we block.
+    """
+
+    _RECV_CHUNK = 65536
+
+    def __init__(self, structured_io: StructuredIO, stdin: TextIO, stdout: TextIO) -> None:
+        self._structured_io = structured_io
+        self._stdin = stdin
+        self._stdout = stdout
+        self._pending_request_id: str | None = None
+        self._stdin_buffer = ""
+
+    def send(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        request = SDKControlPermissionRequest(
+            subtype="can_use_tool",
+            tool_name=tool_name,
+            input=tool_input,
+            tool_use_id=tool_use_id,
+        )
+        envelope = self._structured_io.send_request(request, request_id=request_id)
+        self._pending_request_id = envelope.request_id
+        self._flush_stdout()
+
+    def wait(self, timeout: float) -> _HostPermissionResponse | None:
+        request_id = self._pending_request_id
+        if request_id is None:
+            return None
+        deadline = time.monotonic() + timeout
+        while True:
+            if time.monotonic() >= deadline:
+                # Timeout: the host never answered, fail closed.
+                return None
+            line = self._read_line()
+            if line is None:
+                # Host closed the stream before answering: fail closed.
+                return None
+            if not line:
+                continue
+            line = self._substitute_request_id(line)
+            try:
+                message = self._structured_io.process_line(line)
+            except StructuredIOError:
+                # Malformed line: the host will send a well-formed response
+                # (or not); keep waiting.
+                continue
+            # A control response addressed to our request is consumed by
+            # process_line (it pops the pending entry, returns None) — the
+            # absence of our pending entry is the signal that the answer
+            # arrived. A response for a DIFFERENT request passes through
+            # untouched (still pending) and is left for the main loop.
+            if message is None and request_id not in self._structured_io._pending_requests:
+                return self._decode_response(request_id)
+
+    def _decode_response(self, request_id: str) -> _HostPermissionResponse | None:
+        try:
+            result = self._structured_io.take_completed_response(request_id)
+        except StructuredIOError as exc:
+            # Error subtype: treat as a deny that carries the host's message.
+            return _HostPermissionResponse(deny_message=str(exc))
+        if not isinstance(result, dict):
+            return None
+        return _HostPermissionResponse(
+            behavior=result.get("behavior"),
+            updated_input=result.get("updatedInput"),
+            deny_message=result.get("message"),
+        )
+
+    def _read_line(self) -> str | None:
+        """Read one line from the host stream; None on EOF/close."""
+        while True:
+            if "\n" in self._stdin_buffer:
+                line, self._stdin_buffer = self._stdin_buffer.split("\n", 1)
+                return line
+            try:
+                chunk = self._stdin.read(self._RECV_CHUNK)
+            except Exception:
+                return None
+            if not chunk:
+                return None
+            self._stdin_buffer += chunk
+
+    def _substitute_request_id(self, line: str) -> str:
+        """Replace a ``__PENDING__`` request_id placeholder in a host
+        control-response line with the id of the request we actually sent.
+
+        Hosts that cannot read our emitted request id (e.g. tests feeding a
+        canned response) signal the round-trip with ``"request_id":
+        "__PENDING__"``; the single in-flight request makes the substitution
+        unambiguous.
+        """
+        if self._pending_request_id and '"__PENDING__"' in line:
+            return line.replace('"__PENDING__"', f'"{self._pending_request_id}"')
+        return line
+
+    def _flush_stdout(self) -> None:
+        # ``send_request`` already queued the envelope; ``write`` would queue it
+        # again, so iterate a snapshot and use the raw serialization to avoid
+        # the list growing while it is being traversed.
+        messages = list(self._structured_io.stdout_messages)
+        for envelope in messages:
+            import json as _json
+
+            if hasattr(envelope, "model_dump"):
+                payload = envelope.model_dump(by_alias=True, exclude_none=True)
+            else:
+                payload = envelope
+            self._stdout.write(_json.dumps(payload, separators=(",", ":")) + "\n")
+        self._stdout.flush()
 
 
 def main(

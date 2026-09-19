@@ -2593,6 +2593,438 @@ def test_structured_io_take_completed_response_requires_known_request() -> None:
         io.take_completed_response("missing")
 
 
+class _RecordingPermissionChannel:
+    """Minimal host permission channel for engine-level tests.
+
+    Records what the engine asked and returns a canned host decision, so the
+    emitter logic in the query engine can be exercised without a real stream.
+    """
+
+    def __init__(self, response: dict[str, object] | None = None) -> None:
+        self.sent: list[tuple[str, dict[str, object], str]] = []
+        self._response = response
+
+    def send(self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str) -> None:
+        self.sent.append((tool_name, dict(tool_input), tool_use_id))
+
+    def wait(self, timeout: float) -> Any | None:
+        if self._response is None:
+            return None
+        return _CannedPermissionResponse(self._response)
+
+
+class _CannedPermissionResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.behavior = payload.get("behavior")
+        self.updatedInput = payload.get("updatedInput")
+        self.message = payload.get("message")
+
+
+class _AskToolExecutor:
+    """A turn executor whose single tool call resolves to an ``ask``.
+
+    A final answer is only produced when ``continuation_count >= 1`` — i.e.
+    after the (host-approved) tool has run — so these tests pair with
+    ``max_tool_continuations = 1``: the first call asks for the tool, the
+    second returns the final turn.
+    """
+
+    def __init__(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        tool_use_id: str = "tool-ask-1",
+        final_text: str = "Done after host decision",
+    ) -> None:
+        self._tool_name = tool_name
+        self._arguments = arguments
+        self._tool_use_id = tool_use_id
+        self._final_text = final_text
+
+    def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
+        if context.continuation_count < 1:
+            return ExecutedTurn(
+                stop_reason="tool_use",
+                tool_calls=[
+                    ToolCallRequest(
+                        tool_name=self._tool_name,
+                        arguments=dict(self._arguments),
+                        tool_use_id=self._tool_use_id,
+                    )
+                ],
+            )
+        return ExecutedTurn(
+            stop_reason="end_turn",
+            assistant_text=self._final_text,
+        )
+
+
+def _single_continuation_runtime(state: RuntimeState, executor: _AskToolExecutor) -> QueryRuntime:
+    runtime = QueryRuntime(state=state, turn_executor=executor)
+    # Two continuations: iteration 0 asks for the tool (continuation_count 0),
+    # iteration 1 returns the executor's final answer (continuation_count 1).
+    runtime.max_tool_continuations = 2
+    return runtime
+
+
+def test_query_runtime_asks_host_when_permission_resolves_to_ask_and_host_allows(tmp_path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "note.txt"
+    target.write_text("note\n", encoding="utf-8")
+
+    channel = _RecordingPermissionChannel({"behavior": "allow"})
+    state = RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home"))
+    state.host_permission_channel = channel
+
+    runtime = _single_continuation_runtime(state, _AskToolExecutor("Read", {"file_path": str(target)}))
+
+    outputs = runtime.handle_user_message(
+        SDKUserMessage(
+            type="user",
+            message={"role": "user", "content": "read the note"},
+            parent_tool_use_id=None,
+        )
+    )
+
+    assert channel.sent == [("Read", {"file_path": str(target)}, "tool-ask-1")]
+    assert len(outputs) == 6
+    assert isinstance(outputs[0], SDKSessionStateChangedMessage)
+    assert outputs[0].state == "running"
+    assert isinstance(outputs[1], SDKRequestStartMessage)
+    assert outputs[1].event.type == "stream_request_start"
+    assert getattr(outputs[2], "type", None) == "tool_progress"
+    assert isinstance(outputs[3], SDKAssistantMessage)
+    assert isinstance(outputs[4], SDKResultSuccess)
+    assert isinstance(outputs[5], SDKSessionStateChangedMessage)
+    assert outputs[5].state == "idle"
+
+
+def test_query_runtime_denies_when_host_answers_deny(tmp_path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "secret.txt"
+    target.write_text("secret\n", encoding="utf-8")
+
+    channel = _RecordingPermissionChannel({"behavior": "deny", "message": "host says no"})
+    state = RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home"))
+    state.host_permission_channel = channel
+
+    runtime = _single_continuation_runtime(state, _AskToolExecutor("Read", {"file_path": str(target)}))
+
+    outputs = runtime.handle_user_message(
+        SDKUserMessage(
+            type="user",
+            message={"role": "user", "content": "read the secret"},
+            parent_tool_use_id=None,
+        )
+    )
+
+    assert channel.sent == [("Read", {"file_path": str(target)}, "tool-ask-1")]
+    assert len(outputs) == 4
+    assert isinstance(outputs[2], SDKResultError)
+    assert outputs[2].errors == ["host says no"]
+    assert isinstance(outputs[3], SDKSessionStateChangedMessage)
+    assert outputs[3].state == "idle"
+
+
+def test_query_runtime_denies_when_host_never_answers(tmp_path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "note.txt"
+    target.write_text("note\n", encoding="utf-8")
+
+    channel = _RecordingPermissionChannel(None)
+    state = RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home"))
+    state.host_permission_channel = channel
+
+    runtime = _single_continuation_runtime(state, _AskToolExecutor("Read", {"file_path": str(target)}))
+
+    outputs = runtime.handle_user_message(
+        SDKUserMessage(
+            type="user",
+            message={"role": "user", "content": "read the note"},
+            parent_tool_use_id=None,
+        )
+    )
+
+    assert channel.sent == [("Read", {"file_path": str(target)}, "tool-ask-1")]
+    assert len(outputs) == 4
+    assert isinstance(outputs[2], SDKResultError)
+    assert outputs[2].errors == ["Read permission request timed out waiting for the host"]
+
+
+def test_query_runtime_prefers_tui_callback_over_host_channel(tmp_path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "note.txt"
+    target.write_text("note\n", encoding="utf-8")
+
+    channel = _RecordingPermissionChannel({"behavior": "allow", "updatedInput": {"file_path": str(target)}})
+    calls: list[tuple[str, str, dict[str, Any], str | None]] = []
+
+    def tui_callback(tool_use_id: str, tool_name: str, tool_input: dict[str, Any], content: str | None) -> tuple[str, dict[str, Any] | None, str | None]:
+        calls.append((tool_use_id, tool_name, dict(tool_input), content))
+        return ("allow", None, None)
+
+    state = RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home"))
+    state.host_permission_channel = channel
+    state.permission_ask_callback = tui_callback
+
+    runtime = _single_continuation_runtime(state, _AskToolExecutor("Read", {"file_path": str(target)}))
+
+    outputs = runtime.handle_user_message(
+        SDKUserMessage(
+            type="user",
+            message={"role": "user", "content": "read the note"},
+            parent_tool_use_id=None,
+        )
+    )
+
+    assert calls == [("tool-ask-1", "Read", {"file_path": str(target)}, str(target))]
+    assert channel.sent == []
+    assert len(outputs) == 6
+    assert isinstance(outputs[3], SDKAssistantMessage)
+    assert isinstance(outputs[4], SDKResultSuccess)
+    assert isinstance(outputs[5], SDKSessionStateChangedMessage)
+    assert outputs[5].state == "idle"
+
+
+def test_query_runtime_denies_without_host_channel(tmp_path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "note.txt"
+    target.write_text("note\n", encoding="utf-8")
+
+    state = RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home"))
+    assert state.host_permission_channel is None
+
+    runtime = _single_continuation_runtime(state, _AskToolExecutor("Read", {"file_path": str(target)}))
+
+    outputs = runtime.handle_user_message(
+        SDKUserMessage(
+            type="user",
+            message={"role": "user", "content": "read the note"},
+            parent_tool_use_id=None,
+        )
+    )
+
+    assert state.host_permission_channel is None
+    assert len(outputs) == 4
+    assert isinstance(outputs[2], SDKResultError)
+    assert outputs[2].errors == ["Read requires permission"]
+    assert isinstance(outputs[3], SDKSessionStateChangedMessage)
+    assert outputs[3].state == "idle"
+
+
+def test_stream_json_channel_round_trips_can_use_tool_with_allow(tmp_path) -> None:
+    from py_claw.cli.main import _StreamJsonPermissionChannel
+
+    structured_io = StructuredIO()
+    stdin = StringIO(
+        '{"type":"control_response","response":{"subtype":"success","request_id":"req-allow",'
+        '"response":{"behavior":"allow","updatedInput":{"file_path":"/tmp/note.txt"}}}}\n'
+    )
+    stdout = StringIO()
+    channel = _StreamJsonPermissionChannel(structured_io, stdin, stdout)
+
+    channel.send("Read", {"file_path": "/tmp/note.txt"}, "tool-ask-1", request_id="req-allow")
+
+    request_lines = [line for line in stdout.getvalue().splitlines() if line]
+    assert len(request_lines) == 1
+    envelope = SDKControlRequestEnvelope.model_validate_json(request_lines[0])
+    assert envelope.request_id == "req-allow"
+    assert envelope.request.subtype == "can_use_tool"
+    assert envelope.request.tool_name == "Read"
+    assert envelope.request.tool_use_id == "tool-ask-1"
+    assert envelope.request.input == {"file_path": "/tmp/note.txt"}
+
+    response = channel.wait(timeout=1.0)
+    assert response is not None
+    assert response.behavior == "allow"
+    assert response.updatedInput == {"file_path": "/tmp/note.txt"}
+
+
+def test_stream_json_channel_round_trips_can_use_tool_with_deny_message(tmp_path) -> None:
+    from py_claw.cli.main import _StreamJsonPermissionChannel
+
+    structured_io = StructuredIO()
+    stdin = StringIO(
+        '{"type":"control_response","response":{"subtype":"success","request_id":"req-deny",'
+        '"response":{"behavior":"deny","message":"owner denied"}}}\n'
+    )
+    stdout = StringIO()
+    channel = _StreamJsonPermissionChannel(structured_io, stdin, stdout)
+
+    channel.send("Read", {"file_path": "/tmp/note.txt"}, "req-deny", request_id="req-deny")
+
+    response = channel.wait(timeout=1.0)
+    assert response is not None
+    assert response.behavior == "deny"
+    assert response.message == "owner denied"
+
+
+def test_stream_json_channel_times_out_when_host_never_answers(tmp_path) -> None:
+    from py_claw.cli.main import _StreamJsonPermissionChannel
+
+    structured_io = StructuredIO()
+    stdin = StringIO("")
+    stdout = StringIO()
+    channel = _StreamJsonPermissionChannel(structured_io, stdin, stdout)
+
+    channel.send("Read", {"file_path": "/tmp/note.txt"}, "tool-ask-1")
+
+    # The stream is still open: the host simply has not answered yet.
+    assert channel.wait(timeout=0.1) is None
+
+    # Once the host closes the stream (iter_messages drains to EOF and
+    # _run_stream_json marks the input closed), the wait fails fast instead of
+    # blocking on a read against a closed stream.
+    structured_io.close_input()
+    assert channel.wait(timeout=5.0) is None
+
+
+def test_stream_json_channel_treats_error_response_as_deny(tmp_path) -> None:
+    from py_claw.cli.main import _StreamJsonPermissionChannel
+
+    structured_io = StructuredIO()
+    # An error-type control response to our request_id is the host's way of
+    # saying "cannot answer"; the channel surfaces it as a deny with the
+    # host's message.
+    stdin = StringIO(
+        '{"type":"control_response","response":{"subtype":"success","request_id":"tool-ask-1",'
+        '"response":{"behavior":"deny","message":"boom"}}}\n'
+    )
+    stdout = StringIO()
+    channel = _StreamJsonPermissionChannel(structured_io, stdin, stdout)
+
+    channel.send("Read", {"file_path": "/tmp/note.txt"}, "tool-ask-1", request_id="tool-ask-1")
+
+    response = channel.wait(timeout=1.0)
+    assert response is not None
+    assert response.behavior == "deny"
+    assert response.message == "boom"
+
+    # The loop above already consumed the stream to EOF, so the request stays
+    # open until _run_stream_json marks the input closed on shutdown.
+    structured_io.close_input()
+
+
+def test_stream_json_channel_fails_fast_after_host_closes_stream(tmp_path) -> None:
+    from py_claw.cli.main import _StreamJsonPermissionChannel
+
+    structured_io = StructuredIO()
+    stdin = StringIO("")
+    stdout = StringIO()
+    channel = _StreamJsonPermissionChannel(structured_io, stdin, stdout)
+
+    channel.send("Read", {"file_path": "/tmp/note.txt"}, "tool-ask-1")
+
+    structured_io.close_input()
+    response = channel.wait(timeout=5.0)
+    assert response is None
+
+
+def test_stream_json_emits_can_use_tool_when_host_allows_tool_call(tmp_path, monkeypatch) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "note.txt"
+    target.write_text("note\n", encoding="utf-8")
+
+    class SdkHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            payload = json.loads(body.decode("utf-8"))
+            context = payload["context"]
+            if context["continuation_count"] == 0:
+                response = {
+                    "response": {
+                        "assistant_text": "",
+                        "stop_reason": "tool_use",
+                        "usage": {
+                            "backendRequests": 1,
+                            "backendType": "sdk-url",
+                            "inputTokens": 5,
+                            "outputTokens": 1,
+                            "cacheReadInputTokens": 0,
+                            "cacheCreationInputTokens": 0,
+                            "webSearchRequests": 0,
+                            "inputTextLength": 1,
+                            "outputTextLength": 0,
+                        },
+                        "model_usage": {},
+                        "tool_calls": [
+                            {
+                                "tool_name": "Read",
+                                "arguments": {"file_path": str(target)},
+                                "tool_use_id": "tool-read-host",
+                            }
+                        ],
+                    }
+                }
+            else:
+                response = {
+                    "response": {
+                        "assistant_text": "Done after host-approved read",
+                        "usage": {
+                            "backendRequests": 1,
+                            "backendType": "sdk-url",
+                            "inputTokens": 5,
+                            "outputTokens": 4,
+                            "cacheReadInputTokens": 0,
+                            "cacheCreationInputTokens": 0,
+                            "webSearchRequests": 0,
+                            "inputTextLength": 1,
+                            "outputTextLength": 4,
+                        },
+                        "model_usage": {},
+                    }
+                }
+            encoded = json.dumps(response).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    with _serve_http(SdkHandler) as base_url:
+        stdin = StringIO(
+            '{"type":"user","message":{"role":"user","content":"read the note"},"parent_tool_use_id":null}\n'
+            '{"type":"control_response","response":{"subtype":"success","request_id":"__PENDING__",'
+            '"response":{"behavior":"allow","updatedInput":{"file_path":"' + str(target) + '"}}}}\n'
+        )
+        stdout = StringIO()
+
+        assert main(
+            [
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--sdk-url",
+                f"{base_url}/sdk",
+            ],
+            stdin=stdin,
+            stdout=stdout,
+        ) == 0
+
+    lines = [line for line in stdout.getvalue().splitlines() if line]
+    request_lines = [line for line in lines if '"type":"control_request"' in line]
+    assert len(request_lines) == 1
+    envelope = SDKControlRequestEnvelope.model_validate_json(request_lines[0])
+    assert envelope.request.subtype == "can_use_tool"
+    assert envelope.request.tool_name == "Read"
+    assert envelope.request.tool_use_id == "tool-read-host"
+
+    assert any('"type":"tool_progress"' in line and '"tool-read-host"' in line for line in lines)
+
+    assert any('"Done after host-approved read"' in line for line in lines)
+    assert not any("requires permission" in line for line in lines)
+
+
 def test_structured_io_rejects_invalid_user_role() -> None:
     io = StructuredIO()
 

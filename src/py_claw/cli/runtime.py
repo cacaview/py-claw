@@ -29,6 +29,27 @@ class QueryControl(Protocol):
     def restore_session_state(self, session_id: str) -> bool: ...
 
 
+class PermissionResponse(Protocol):
+    """Host answer to a ``can_use_tool`` control request (host-side shape)."""
+
+    behavior: str
+    message: str | None
+    updatedInput: dict[str, Any] | None
+
+
+class HostPermissionChannel(Protocol):
+    """A request/response channel to a stream-json host, for ``can_use_tool`` asks.
+
+    Only installed when the process actually speaks the stream-json control
+    protocol (``cli/main.py::_run_stream_json``); print mode and the TUI
+    leave it ``None`` so the query engine keeps its fail-closed deny.
+    """
+
+    def send(self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str) -> None: ...
+
+    def wait(self, timeout: float) -> PermissionResponse | None: ...
+
+
 @dataclass(slots=True)
 class ActiveWorktreeSession:
     original_cwd: str
@@ -71,6 +92,7 @@ class RuntimeState:
     advisor_model: str | None = None
     session_allowed_tools: set[str] = field(default_factory=set)
     permission_ask_callback: Callable[[str, str, dict[str, Any], str | None], tuple[str, dict[str, Any] | None, str | None]] | None = None
+    host_permission_channel: HostPermissionChannel | None = None
     ask_user_callback: Callable[[Any], tuple[str, dict[str, Any] | None]] | None = None
 
     # Session cost/token tracking

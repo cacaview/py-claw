@@ -42,6 +42,12 @@ if TYPE_CHECKING:
     from py_claw.cli.runtime import RuntimeState
 
 
+# How long the engine waits for a host to answer a ``can_use_tool`` control
+# request before failing closed (deny). A prompt the host never answers must
+# not block the turn.
+_HOST_PERMISSION_TIMEOUT_SECONDS = 300.0
+
+
 class _StreamingList(Sequence[StdoutMessage]):
     """A sequence that is both an iterator (for streaming) and indexable (for tests).
 
@@ -485,6 +491,9 @@ class QueryRuntime:
 
             state = _RuntimeState()
         self.state = state
+        # Instance knob (defaults to the class constant) so tests can shrink the
+        # tool-continuation loop without monkeypatching the whole class.
+        self.max_tool_continuations = self._MAX_TOOL_CONTINUATIONS
         self.state.query_runtime = self
         self._runtime_turn_executor = RuntimeTurnExecutor(
             driver=PlaceholderTurnDriver(placeholder_executor=BackendTurnExecutor(_resolve_query_backend(self.state)))
@@ -822,6 +831,15 @@ class QueryRuntime:
         outputs.append(self._error_result_message(session_id, error, started))
         return self._finalize_outputs(outputs, session_id, reset_session=reset_session)
 
+    def _turn_failure_message(self, failure: QueryTurnFailure) -> Exception:
+        """The user-facing message for a turn failure.
+
+        Wraps the underlying error in a plain ``RuntimeError(str(error))`` so
+        the surfaced text is exactly the message the failing path produced
+        (e.g. a host's deny message) rather than a repr of the exception class.
+        """
+        return RuntimeError(str(failure.error))
+
     def _should_emit_request_start(self, prepared: PreparedTurn | None) -> bool:
         return bool(prepared and prepared.should_query and prepared.query_text is not None)
 
@@ -847,7 +865,7 @@ class QueryRuntime:
         previous_call_signature: str | None = None
         identical_call_streak = 0
         try:
-            for _ in range(self._MAX_TOOL_CONTINUATIONS):
+            for _ in range(self.max_tool_continuations):
                 executed: ExecutedTurn | None = None
                 # Check if the executor supports streaming
                 if hasattr(self._turn_executor, "execute_streaming"):
@@ -973,7 +991,7 @@ class QueryRuntime:
             self._active_turn_state = None
         raise QueryTurnFailure(
             RuntimeError(
-                f"Turn stopped after {self._MAX_TOOL_CONTINUATIONS} tool continuations without a final answer. "
+                f"Turn stopped after {self.max_tool_continuations} tool continuations without a final answer. "
                 "The model kept requesting tool calls; check the tool results above or reduce the task scope."
             ),
             tool_outputs,
@@ -995,7 +1013,7 @@ class QueryRuntime:
         previous_call_signature: str | None = None
         identical_call_streak = 0
         try:
-            for _ in range(self._MAX_TOOL_CONTINUATIONS):
+            for _ in range(self.max_tool_continuations):
                 executed = self._turn_executor.execute(prepared, self._current_turn_context())
                 if self.state.interrupt_event.is_set():
                     raise QueryTurnFailure(RuntimeError("Query interrupted"), tool_outputs)
@@ -1047,7 +1065,7 @@ class QueryRuntime:
             self._turn_in_progress = previous_in_progress
         raise QueryTurnFailure(
             RuntimeError(
-                f"Turn stopped after {self._MAX_TOOL_CONTINUATIONS} tool continuations without a final answer. "
+                f"Turn stopped after {self.max_tool_continuations} tool continuations without a final answer. "
                 "The model kept requesting tool calls; check the tool results above or reduce the task scope."
             ),
             tool_outputs,
@@ -1344,11 +1362,32 @@ class QueryRuntime:
                     else:
                         evaluation.behavior = "deny"
                         evaluation.reason = callback_msg or "User denied permission"
+                else:
+                    host_decision = self._ask_host_for_permission(tool_call.tool_name, tool_input, tool_use_id)
+                    if host_decision is not None:
+                        host_behavior, host_input, host_message = host_decision
+                        if host_behavior == "allow":
+                            explicit_allow = True
+                            if host_input is not None:
+                                tool_input = host_input
+                            evaluation.behavior = "allow"
+                        else:
+                            evaluation.behavior = "deny"
+                            evaluation.reason = host_message or "Host denied permission"
 
             if evaluation.behavior != "allow":
                 message = runtime._build_permission_message(tool_call.tool_name, evaluation.reason, evaluation.mode)
-                if getattr(evaluation, "reason", None) == "User denied permission":
-                    message = "User denied permission"
+                # Preserve the exact host/user decision text (deny message,
+                # timeout, channel error) instead of collapsing it to the
+                # generic "requires permission" wording. Internal engine
+                # reasons ("mode", "deny_rule", "ask", ...) still get the
+                # standard wording.
+                if (
+                    evaluation.behavior == "deny"
+                    and evaluation.reason
+                    and not evaluation.reason.startswith(("mode", "deny_rule", "ask"))
+                ):
+                    message = str(evaluation.reason)
 
                 self.state.hook_runtime.run_permission_denied(
                     settings=settings,
@@ -1360,7 +1399,9 @@ class QueryRuntime:
                     reason=message,
                     permission_mode=self.state.permission_mode,
                 )
-                raise ToolPermissionError(message, behavior=evaluation.behavior)
+                denied = ToolPermissionError(message, behavior=evaluation.behavior)
+                denied._denied_reason = message
+                raise denied
 
         started = perf_counter()
         result = runtime.execute(
@@ -1393,6 +1434,42 @@ class QueryRuntime:
             tool_input=tool_input,
             tool_response=_summarize_tool_output(_model_friendly_tool_output(result.tool_name, result.output)),
         )
+
+    def _ask_host_for_permission(
+        self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str
+    ) -> tuple[str, dict[str, Any] | None, str | None] | None:
+        """Ask a stream-json host to answer a permission ask via ``can_use_tool``.
+
+        Only runs when a host request/response channel is installed (i.e. the
+        process speaks the stream-json control protocol); TUI callbacks are
+        handled before this point and print mode has no channel, so both keep
+        their existing behavior. A host deny, timeout, or error is returned as
+        a deny decision rather than raised, so the caller's deny path (hooks,
+        ToolPermissionError, error-result surfacing) is unchanged.
+        """
+        channel = getattr(self.state, "host_permission_channel", None)
+        if channel is None:
+            return None
+        try:
+            channel.send(tool_name, tool_input, tool_use_id)
+        except Exception as exc:
+            return ("deny", None, f"Failed to send {tool_name} permission request to host: {exc}")
+        try:
+            response = channel.wait(_HOST_PERMISSION_TIMEOUT_SECONDS)
+        except Exception as exc:
+            return ("deny", None, f"Host permission request for {tool_name} failed: {exc}")
+        if response is None:
+            return ("deny", None, f"{tool_name} permission request timed out waiting for the host")
+        behavior = getattr(response, "behavior", None)
+        if behavior == "allow":
+            updated_input = getattr(response, "updatedInput", None)
+            if not isinstance(updated_input, dict):
+                updated_input = None
+            return ("allow", updated_input, None)
+        message = getattr(response, "message", None)
+        if not isinstance(message, str) or not message:
+            message = f"Host denied permission for {tool_name}"
+        return ("deny", None, message)
 
     def _execute_prepared_turn(
         self,
@@ -1427,7 +1504,7 @@ class QueryRuntime:
                 # Tell _build_error_outputs to skip the initial state to avoid duplication.
                 yield from self._build_error_outputs(
                     session_id,
-                    exc.error,
+                    self._turn_failure_message(exc),
                     started,
                     reset_session=False,
                     include_request_start=False,
@@ -1460,6 +1537,12 @@ class QueryRuntime:
             prepared = self._prepare_turn(normalized_user, settings, session_id)
             generator = self._execute_prepared_turn(prepared, session_id, started)
             yield from generator
+        except QueryTurnFailure as exc:
+            # The turn generator re-raises QueryTurnFailure after it already
+            # emitted its own session_state(running)/request_start/error outputs,
+            # so swallow it here (yielding from an except clause would terminate
+            # the generator without letting the finally block run).
+            return
         except Exception as exc:
             # Only reached if _prepare_turn or the outer try block raises
             # before yielding anything from the inner generator.
@@ -1799,6 +1882,19 @@ class QueryRuntime:
         )
 
     def _exception_message(self, error: Exception) -> str:
+        # The exact host/user permission-decision text (deny message,
+        # timeout, channel error) is carried on the originating
+        # ToolPermissionError; it may be wrapped in a QueryTurnFailure by
+        # the tool-continuation loop, so walk the cause chain.
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, ToolPermissionError):
+                denied_reason = getattr(current, "_denied_reason", None)
+                if denied_reason:
+                    return str(denied_reason)
+            current = current.__cause__ or current.__context__
         if len(error.args) == 1 and isinstance(error.args[0], str):
             return error.args[0]
         return str(error)
