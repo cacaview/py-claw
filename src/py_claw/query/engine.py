@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from time import perf_counter
@@ -483,7 +484,13 @@ class RuntimeTurnExecutor:
 
 
 class QueryRuntime:
-    _MAX_TOOL_CONTINUATIONS = 8
+    # Default per-turn tool-continuation cap. 8 was tuned for single-shot Q&A
+    # and terminated real agentic tasks (a clone + edit + test + fix cycle
+    # easily exceeds 8 tool calls per turn); the identical-call loop guard
+    # still stops true runaway loops. Override with the
+    # PYCLAW_MAX_TOOL_CONTINUATIONS env var (e.g. a host that wants a tighter
+    # budget), or via the instance attribute in tests.
+    _MAX_TOOL_CONTINUATIONS = 100
 
     def __init__(self, state: RuntimeState | None = None, *, turn_executor: TurnExecutor | None = None) -> None:
         if state is None:
@@ -491,9 +498,18 @@ class QueryRuntime:
 
             state = _RuntimeState()
         self.state = state
-        # Instance knob (defaults to the class constant) so tests can shrink the
+        # Instance knob (defaults to the class constant, overridable via the
+        # PYCLAW_MAX_TOOL_CONTINUATIONS env var) so tests can shrink the
         # tool-continuation loop without monkeypatching the whole class.
-        self.max_tool_continuations = self._MAX_TOOL_CONTINUATIONS
+        env_cap = os.environ.get("PYCLAW_MAX_TOOL_CONTINUATIONS", "").strip()
+        try:
+            env_cap_value = int(env_cap) if env_cap else 0
+        except ValueError:
+            env_cap_value = 0
+        if env_cap_value > 0:
+            self.max_tool_continuations = env_cap_value
+        else:
+            self.max_tool_continuations = self._MAX_TOOL_CONTINUATIONS
         self.state.query_runtime = self
         self._runtime_turn_executor = RuntimeTurnExecutor(
             driver=PlaceholderTurnDriver(placeholder_executor=BackendTurnExecutor(_resolve_query_backend(self.state)))
@@ -1299,9 +1315,6 @@ class QueryRuntime:
         settings: SettingsLoadResult,
         tool_call: ToolCallRequest,
     ) -> SDKToolProgressMessage:
-        if prepared.allowed_tools is not None and tool_call.tool_name not in prepared.allowed_tools:
-            raise ToolError(f"{tool_call.tool_name} is not allowed for this turn")
-
         tool_input = dict(tool_call.arguments)
         tool_use_id = tool_call.tool_use_id or str(uuid4())
         parent_tool_use_id = tool_call.parent_tool_use_id or ""
@@ -1315,6 +1328,72 @@ class QueryRuntime:
             ),
         )
         self._transcript.append(assistant_step)
+
+        started = perf_counter()
+        try:
+            result, tool_input = self._run_tool_call(prepared, settings, tool_call, tool_input, tool_use_id)
+        except (ToolError, ToolPermissionError) as exc:
+            # Tool-level failures — a blocked command, an out-of-scope path,
+            # a denied permission, a disallowed tool — are recoverable: the
+            # exact error text goes back to the model as the tool result, so
+            # it can correct course instead of the whole turn dying on one
+            # failed call.
+            error_text = f"Error: {self._exception_message(exc)}"
+            self._transcript.append(
+                self._synthetic_tool_result_message(
+                    self._session_id or str(uuid4()),
+                    tool_use_id=tool_use_id,
+                    output=error_text,
+                    is_error=True,
+                )
+            )
+            return self._tool_progress_message(
+                self._session_id or str(uuid4()),
+                tool_use_id=tool_use_id,
+                tool_name=tool_call.tool_name,
+                parent_tool_use_id=parent_tool_use_id or None,
+                elapsed_seconds=max(perf_counter() - started, 0.0),
+                tool_input=tool_input,
+                tool_response=_summarize_tool_output(error_text),
+            )
+        elapsed = max(perf_counter() - started, 0.0)
+        # The transcript keeps the structured output (SDK consumers rely on
+        # it); the model-friendly plain-text rendering happens in the backend
+        # when the transcript is converted to provider messages.
+        self._transcript.append(
+            self._synthetic_tool_result_message(
+                self._session_id or str(uuid4()),
+                tool_use_id=tool_use_id,
+                output=result.output,
+            )
+        )
+        return self._tool_progress_message(
+            self._session_id or str(uuid4()),
+            tool_use_id=tool_use_id,
+            tool_name=result.tool_name,
+            parent_tool_use_id=parent_tool_use_id or None,
+            elapsed_seconds=elapsed,
+            tool_input=tool_input,
+            tool_response=_summarize_tool_output(_model_friendly_tool_output(result.tool_name, result.output)),
+        )
+
+    def _run_tool_call(
+        self,
+        prepared: PreparedTurn,
+        settings: SettingsLoadResult,
+        tool_call: ToolCallRequest,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Run the permission flow and the tool itself; raises on failure.
+
+        Returns ``(result, tool_input)`` — the input may be updated by a
+        permission decision (host/user-provided overrides). ToolError /
+        ToolPermissionError raised here are expected, recoverable failures;
+        the caller turns them into an error tool result.
+        """
+        if prepared.allowed_tools is not None and tool_call.tool_name not in prepared.allowed_tools:
+            raise ToolError(f"{tool_call.tool_name} is not allowed for this turn")
 
         permission_engine = PermissionEngine.from_settings(settings, mode=self.state.permission_mode)
         runtime = self.state.tool_runtime
@@ -1403,7 +1482,6 @@ class QueryRuntime:
                 denied._denied_reason = message
                 raise denied
 
-        started = perf_counter()
         result = runtime.execute(
             tool_call.tool_name,
             tool_input,
@@ -1414,26 +1492,7 @@ class QueryRuntime:
             tool_use_id=tool_use_id,
             permission_mode=self.state.permission_mode,
         )
-        elapsed = max(perf_counter() - started, 0.0)
-        # The transcript keeps the structured output (SDK consumers rely on
-        # it); the model-friendly plain-text rendering happens in the backend
-        # when the transcript is converted to provider messages.
-        self._transcript.append(
-            self._synthetic_tool_result_message(
-                self._session_id or str(uuid4()),
-                tool_use_id=tool_use_id,
-                output=result.output,
-            )
-        )
-        return self._tool_progress_message(
-            self._session_id or str(uuid4()),
-            tool_use_id=tool_use_id,
-            tool_name=result.tool_name,
-            parent_tool_use_id=parent_tool_use_id or None,
-            elapsed_seconds=elapsed,
-            tool_input=tool_input,
-            tool_response=_summarize_tool_output(_model_friendly_tool_output(result.tool_name, result.output)),
-        )
+        return result, tool_input
 
     def _ask_host_for_permission(
         self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str
@@ -1730,19 +1789,23 @@ class QueryRuntime:
         session_id: str,
         *,
         tool_use_id: str,
-        output: dict[str, Any],
+        output: dict[str, Any] | str,
+        is_error: bool = False,
     ) -> SDKUserMessage:
+        block: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": output,
+        }
+        if is_error:
+            # The Anthropic API's tool_result block carries is_error so the
+            # model can tell a failed call from a successful one.
+            block["is_error"] = True
         return SDKUserMessage(
             type="user",
             message={
                 "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": output,
-                    }
-                ],
+                "content": [block],
             },
             parent_tool_use_id=tool_use_id,
             isSynthetic=True,

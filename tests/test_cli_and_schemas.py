@@ -1974,7 +1974,10 @@ def test_query_runtime_returns_error_after_max_tool_continuations(tmp_path) -> N
 
 
 
-def test_query_runtime_returns_error_when_tool_call_violates_allowed_tools(tmp_path, monkeypatch) -> None:
+def test_query_runtime_disallowed_tool_returns_error_result_and_continues(tmp_path, monkeypatch) -> None:
+    """A disallowed tool call is surfaced to the model as an error tool
+    result (is_error) instead of terminating the turn; the model gets a
+    chance to self-correct and the turn can still succeed."""
     project_dir = tmp_path / "project"
     skill_dir = project_dir / ".claude" / "skills" / "restricted"
     skill_dir.mkdir(parents=True)
@@ -1991,23 +1994,32 @@ def test_query_runtime_returns_error_when_tool_call_violates_allowed_tools(tmp_p
     (project_dir / ".claude" / "settings.json").write_text('{"skills":["restricted"]}', encoding="utf-8")
     monkeypatch.chdir(project_dir)
 
-    class ForbiddenToolExecutor:
-        def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
-            return ExecutedTurn(
-                stop_reason="tool_use",
-                tool_calls=[
-                    ToolCallRequest(
-                        tool_name="Read",
-                        arguments={"file_path": str(project_dir / "secret.txt")},
-                        tool_use_id="tool-read-1",
-                    )
-                ],
-            )
+    class DisallowedThenAdaptsExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
 
+        def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
+            self.calls += 1
+            if self.calls == 1:
+                return ExecutedTurn(
+                    stop_reason="tool_use",
+                    tool_calls=[
+                        ToolCallRequest(
+                            tool_name="Read",
+                            arguments={"file_path": str(project_dir / "secret.txt")},
+                            tool_use_id="tool-read-1",
+                        )
+                    ],
+                )
+            # The model saw the error tool result and adapts.
+            return ExecutedTurn(assistant_text="Understood, I cannot use Read here.")
+
+    executor = DisallowedThenAdaptsExecutor()
     runtime = QueryRuntime(
         state=RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home")),
-        turn_executor=ForbiddenToolExecutor(),
+        turn_executor=executor,
     )
+    runtime.max_tool_continuations = 2
 
     outputs = runtime.handle_user_message(
         SDKUserMessage(
@@ -2017,20 +2029,19 @@ def test_query_runtime_returns_error_when_tool_call_violates_allowed_tools(tmp_p
         )
     )
 
-    assert len(outputs) == 4
-    assert isinstance(outputs[0], SDKSessionStateChangedMessage)
-    assert outputs[0].state == "running"
-    assert isinstance(outputs[1], SDKRequestStartMessage)
-    assert outputs[1].event.type == "stream_request_start"
-    assert isinstance(outputs[2], SDKResultError)
-    assert outputs[2].errors == ["Read is not allowed for this turn"]
-    assert isinstance(outputs[3], SDKSessionStateChangedMessage)
-    assert outputs[3].state == "idle"
-    assert len(runtime.transcript) == 1
+    assert executor.calls == 2
+    # The failed call went back to the model as an error tool result with
+    # the exact reason.
+    error_results = _error_tool_results(runtime)
+    assert len(error_results) == 1
+    assert error_results[0].message["content"][0]["content"] == "Error: Read is not allowed for this turn"
+    # The turn continues and succeeds instead of dying on the failed call.
+    assert any(isinstance(o, SDKResultSuccess) for o in outputs)
 
 
-
-def test_query_runtime_returns_error_when_tool_call_permission_denied(tmp_path) -> None:
+def test_query_runtime_permission_denial_returns_error_result_and_continues(tmp_path) -> None:
+    """A policy denial is surfaced to the model as an error tool result
+    (is_error) instead of terminating the turn."""
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     target = project_dir / "secret.txt"
@@ -2042,23 +2053,31 @@ def test_query_runtime_returns_error_when_tool_call_permission_denied(tmp_path) 
         encoding="utf-8",
     )
 
-    class DeniedToolExecutor:
-        def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
-            return ExecutedTurn(
-                stop_reason="tool_use",
-                tool_calls=[
-                    ToolCallRequest(
-                        tool_name="Read",
-                        arguments={"file_path": str(target)},
-                        tool_use_id="tool-read-1",
-                    )
-                ],
-            )
+    class DeniedThenAdaptsExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
 
+        def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
+            self.calls += 1
+            if self.calls == 1:
+                return ExecutedTurn(
+                    stop_reason="tool_use",
+                    tool_calls=[
+                        ToolCallRequest(
+                            tool_name="Read",
+                            arguments={"file_path": str(target)},
+                            tool_use_id="tool-read-1",
+                        )
+                    ],
+                )
+            return ExecutedTurn(assistant_text="Understood, that file is not readable.")
+
+    executor = DeniedThenAdaptsExecutor()
     runtime = QueryRuntime(
         state=RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home")),
-        turn_executor=DeniedToolExecutor(),
+        turn_executor=executor,
     )
+    runtime.max_tool_continuations = 2
 
     outputs = runtime.handle_user_message(
         SDKUserMessage(
@@ -2068,18 +2087,82 @@ def test_query_runtime_returns_error_when_tool_call_permission_denied(tmp_path) 
         )
     )
 
-    assert len(outputs) == 4
-    assert isinstance(outputs[0], SDKSessionStateChangedMessage)
-    assert outputs[0].state == "running"
-    assert isinstance(outputs[1], SDKRequestStartMessage)
-    assert outputs[1].event.type == "stream_request_start"
-    assert isinstance(outputs[2], SDKResultError)
-    assert outputs[2].errors == ["Read requires permission"]
-    assert isinstance(outputs[3], SDKSessionStateChangedMessage)
-    assert outputs[3].state == "idle"
-    assert len(runtime.transcript) == 2
-    assert isinstance(runtime.transcript[1], SDKAssistantMessage)
-    assert runtime.transcript[1].message["content"][0]["type"] == "tool_use"
+    assert executor.calls == 2
+    error_results = _error_tool_results(runtime)
+    assert len(error_results) == 1
+    assert error_results[0].message["content"][0]["content"] == "Error: Read requires permission"
+    assert any(isinstance(o, SDKResultSuccess) for o in outputs)
+
+
+def test_query_runtime_tool_error_self_correction(tmp_path) -> None:
+    """A tool-level ToolError (e.g. a relative file_path) is returned to the
+    model as an error tool result; the model retries with an absolute path
+    and the turn succeeds. This is the self-correction behavior the
+    GitHub-maintenance test (2026-09-20) required after deeds died on
+    'file_path must be absolute'."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "note.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+    # bypassPermissions: both the relative and the absolute call pass the
+    # permission layer, so the tool itself performs the relative-path check.
+    state = RuntimeState(cwd=str(project_dir), home_dir=str(tmp_path / "home"))
+    state.permission_mode = "bypassPermissions"
+
+    class RelativeThenAbsoluteExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, prepared: PreparedTurn, context: QueryTurnContext) -> ExecutedTurn:
+            self.calls += 1
+            if self.calls == 1:
+                # Relative path → Read raises ToolError("file_path must be absolute").
+                return ExecutedTurn(
+                    stop_reason="tool_use",
+                    tool_calls=[
+                        ToolCallRequest(
+                            tool_name="Read",
+                            arguments={"file_path": "note.txt"},
+                            tool_use_id="tool-read-1",
+                        )
+                    ],
+                )
+            if self.calls == 2:
+                # The model corrects course: absolute path, allowed by policy.
+                return ExecutedTurn(
+                    stop_reason="tool_use",
+                    tool_calls=[
+                        ToolCallRequest(
+                            tool_name="Read",
+                            arguments={"file_path": str(target)},
+                            tool_use_id="tool-read-2",
+                        )
+                    ],
+                )
+            return ExecutedTurn(assistant_text="Read the note successfully.")
+
+    executor = RelativeThenAbsoluteExecutor()
+    runtime = QueryRuntime(
+        state=state,
+        turn_executor=executor,
+    )
+    runtime.max_tool_continuations = 3
+
+    outputs = runtime.handle_user_message(
+        SDKUserMessage(
+            type="user",
+            message={"role": "user", "content": "read the note"},
+            parent_tool_use_id=None,
+        )
+    )
+
+    assert executor.calls == 3
+    error_results = _error_tool_results(runtime)
+    assert len(error_results) == 1
+    assert error_results[0].message["content"][0]["content"] == "Error: file_path must be absolute"
+    # The corrected call succeeded and the turn finished successfully.
+    assert any(isinstance(o, SDKResultSuccess) for o in outputs)
 
 
 
@@ -2667,6 +2750,22 @@ def _single_continuation_runtime(state: RuntimeState, executor: _AskToolExecutor
     return runtime
 
 
+def _error_tool_results(runtime: QueryRuntime) -> list[SDKUserMessage]:
+    """Transcript messages carrying an is_error tool_result block."""
+    results = []
+    for message in runtime.transcript:
+        if not isinstance(message, SDKUserMessage):
+            continue
+        content = message.message.get("content") if isinstance(message.message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                results.append(message)
+                break
+    return results
+
+
 def test_query_runtime_asks_host_when_permission_resolves_to_ask_and_host_allows(tmp_path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -2700,7 +2799,7 @@ def test_query_runtime_asks_host_when_permission_resolves_to_ask_and_host_allows
     assert outputs[5].state == "idle"
 
 
-def test_query_runtime_denies_when_host_answers_deny(tmp_path) -> None:
+def test_query_runtime_host_deny_returned_to_model_as_error_result(tmp_path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     target = project_dir / "secret.txt"
@@ -2721,14 +2820,18 @@ def test_query_runtime_denies_when_host_answers_deny(tmp_path) -> None:
     )
 
     assert channel.sent == [("Read", {"file_path": str(target)}, "tool-ask-1")]
-    assert len(outputs) == 4
-    assert isinstance(outputs[2], SDKResultError)
-    assert outputs[2].errors == ["host says no"]
-    assert isinstance(outputs[3], SDKSessionStateChangedMessage)
-    assert outputs[3].state == "idle"
+    # The exact host denial text is returned to the model as an is_error
+    # tool result instead of terminating the turn; the model's next call
+    # (its adapted answer) ends the turn successfully.
+    error_results = _error_tool_results(runtime)
+    assert len(error_results) == 1
+    assert error_results[0].message["content"][0]["content"] == "Error: host says no"
+    assert any(isinstance(o, SDKResultSuccess) for o in outputs)
+    assert isinstance(outputs[-1], SDKSessionStateChangedMessage)
+    assert outputs[-1].state == "idle"
 
 
-def test_query_runtime_denies_when_host_never_answers(tmp_path) -> None:
+def test_query_runtime_host_timeout_returned_to_model_as_error_result(tmp_path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     target = project_dir / "note.txt"
@@ -2749,9 +2852,12 @@ def test_query_runtime_denies_when_host_never_answers(tmp_path) -> None:
     )
 
     assert channel.sent == [("Read", {"file_path": str(target)}, "tool-ask-1")]
-    assert len(outputs) == 4
-    assert isinstance(outputs[2], SDKResultError)
-    assert outputs[2].errors == ["Read permission request timed out waiting for the host"]
+    # A host timeout is a denial like any other: the exact timeout text goes
+    # back to the model as an is_error tool result and the turn continues.
+    error_results = _error_tool_results(runtime)
+    assert len(error_results) == 1
+    assert error_results[0].message["content"][0]["content"] == "Error: Read permission request timed out waiting for the host"
+    assert any(isinstance(o, SDKResultSuccess) for o in outputs)
 
 
 def test_query_runtime_prefers_tui_callback_over_host_channel(tmp_path) -> None:
@@ -2790,7 +2896,7 @@ def test_query_runtime_prefers_tui_callback_over_host_channel(tmp_path) -> None:
     assert outputs[5].state == "idle"
 
 
-def test_query_runtime_denies_without_host_channel(tmp_path) -> None:
+def test_query_runtime_permission_ask_without_host_returned_to_model_as_error_result(tmp_path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     target = project_dir / "note.txt"
@@ -2810,11 +2916,14 @@ def test_query_runtime_denies_without_host_channel(tmp_path) -> None:
     )
 
     assert state.host_permission_channel is None
-    assert len(outputs) == 4
-    assert isinstance(outputs[2], SDKResultError)
-    assert outputs[2].errors == ["Read requires permission"]
-    assert isinstance(outputs[3], SDKSessionStateChangedMessage)
-    assert outputs[3].state == "idle"
+    # No host channel and no callback: the ask stays unresolved and is
+    # returned to the model as an is_error tool result; the turn continues.
+    error_results = _error_tool_results(runtime)
+    assert len(error_results) == 1
+    assert error_results[0].message["content"][0]["content"] == "Error: Read requires permission"
+    assert any(isinstance(o, SDKResultSuccess) for o in outputs)
+    assert isinstance(outputs[-1], SDKSessionStateChangedMessage)
+    assert outputs[-1].state == "idle"
 
 
 def test_stream_json_channel_round_trips_can_use_tool_with_allow(tmp_path) -> None:

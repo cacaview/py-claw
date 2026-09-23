@@ -10,6 +10,7 @@ from py_claw.tools.bash import (
     BashSecurityResult,
     analyze_command_security,
     check_command_injection,
+    check_command_warnings,
     check_env_whitelist,
     check_zsh_bypass,
     classify_command,
@@ -157,17 +158,30 @@ class TestSecurityAnalysis:
         result = analyze_command_security("ls -la /tmp")
         assert result.is_safe
 
-    def test_injection_semicolon(self):
-        """Semicolons are valid compound operators; newline in quoted context is injection."""
-        # echo '\n...' has newline inside quotes — the \n is the injection vector
+    def test_multiline_quoted_not_injection(self):
+        """A newline inside a quoted argument is ordinary shell, not injection."""
         result = analyze_command_security("echo '\nrm -rf /'")
-        assert result.has_injection
-        assert result.injection_type == "newline_injection"
+        assert not result.has_injection
+        assert result.severity != "critical"
+        assert "multiline_command" in result.warnings
 
-    def test_injection_newline(self):
+    def test_multiline_command_not_injection(self):
+        """Multi-line commands are ordinary shell syntax — reported, not fatal.
+
+        The sandbox containment applies to the whole command, so a newline
+        between statements is no longer classified as critical injection.
+        """
         result = analyze_command_security("echo hello\nrm -rf /")
+        assert not result.has_injection
+        assert result.severity != "critical"
+        assert "multiline_command" in result.warnings
+
+    def test_quote_escape_still_critical(self):
+        """The quote-escape shape remains the one critical injection pattern."""
+        result = analyze_command_security("echo 'a' ; 'b'")
         assert result.has_injection
-        assert result.injection_type == "newline_injection"
+        assert result.injection_type == "quote_escape_injection"
+        assert result.severity == "critical"
 
     def test_safe_compound_operators(self):
         """Compound operators && and || should NOT be flagged as injection."""
@@ -240,8 +254,14 @@ class TestSecurityAnalysis:
         safe = analyze_command_security("echo hello")
         assert safe.severity_score == 0
 
-        # injection → critical
-        inj = analyze_command_security("echo $(rm -rf /)")
+        # command substitution → medium (reported, no longer critical)
+        sub = analyze_command_security("echo $(rm -rf /)")
+        assert sub.severity == "medium"
+        assert not sub.has_injection
+        assert "command_substitution" in sub.dangerous_patterns
+
+        # quote-escape injection → critical
+        inj = analyze_command_security("echo 'a' ; 'b'")
         assert inj.severity_score >= 4
         assert inj.has_injection
 
@@ -268,10 +288,17 @@ class TestCheckFunctions:
             assert not has_inj, f"False positive on: {cmd}"
 
     def test_check_command_injection_true_positives(self):
-        """Command substitution patterns should be detected."""
-        has_inj, inj_type, _ = check_command_injection("echo $(echo a; rm -rf /)")
+        """Quote-escape injection is still detected as critical."""
+        has_inj, inj_type, _ = check_command_injection("echo 'a' ; 'b'")
         assert has_inj
-        assert inj_type == "command_substitution"
+        assert inj_type == "quote_escape_injection"
+
+    def test_check_command_injection_substitution_not_critical(self):
+        """Command substitution is ordinary shell: warning, not critical."""
+        has_inj, inj_type, _ = check_command_injection("echo $(echo a; rm -rf /)")
+        assert not has_inj
+        assert inj_type is None
+        assert "command_substitution" in check_command_warnings("echo $(echo a; rm -rf /)")
 
     def test_check_zsh_bypass_false_positives(self):
         safe_commands = ["echo hello", "ls -la /tmp", "cat foo | grep bar"]
@@ -348,7 +375,15 @@ class TestLocalShellIntegration:
         assert ast_result.severity == "safe"
 
     def test_security_block_injection(self):
-        """AST analysis should detect and flag injection."""
-        ast_result = analyze_command_security("echo $(rm -rf /)")
+        """AST analysis should detect and flag critical injection."""
+        ast_result = analyze_command_security("echo 'a' ; 'b'")
         assert not ast_result.is_safe
         assert ast_result.has_injection
+        assert ast_result.severity == "critical"
+
+    def test_security_flag_substitution(self):
+        """Command substitution is flagged (unsafe) but is not critical injection."""
+        ast_result = analyze_command_security("echo $(rm -rf /)")
+        assert not ast_result.is_safe
+        assert not ast_result.has_injection
+        assert "command_substitution" in ast_result.dangerous_patterns

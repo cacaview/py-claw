@@ -162,23 +162,29 @@ class BashSecurityResult:
 
 
 def check_command_injection(command: str) -> tuple[bool, str | None, str | None]:
-    """Check for command injection patterns.
+    """Check for CRITICAL command injection patterns.
 
     Args:
         command: Bash command string
 
     Returns:
         Tuple of (has_injection, injection_type, details)
+
+    Only the quote-escape shape (a semicolon right after a closing quote) is
+    treated as critical injection: it is rare in legitimate agent output and
+    is the classic quote-breaking injection vector. The other constructs this
+    used to flag — command substitution ``$(...)``, backticks, and multi-line
+    commands — are ordinary shell syntax; treating them as critical terminated
+    agent turns on everyday commands (see the round-1 GitHub-maintenance
+    test failures, 2026-09-20). Substitution is still *reported* by the AST
+    pass as a medium-severity ``dangerous`` pattern, and multi-line commands
+    surface as a warning, so nothing is invisible — they are just no longer
+    turn-killing.
     """
     # Check for classic injection patterns
     injection_patterns = [
-        # Command substitution injection (only when unquoted or suspicious)
-        (r"\$\([^)]+\)", "command_substitution", "$() command substitution"),
-        (r"`[^`]+`", "backtick_substitution", "Backtick command substitution"),
         # Quote escape — semicolon after closing quote (injection attempt)
         (r"'\s*;\s*'", "quote_escape_injection", "Quote escape pattern for injection"),
-        # Newline injection
-        (r"\n\s*\w+", "newline_injection", "Newline used to inject additional command"),
     ]
 
     for pattern, inj_type, details in injection_patterns:
@@ -186,6 +192,29 @@ def check_command_injection(command: str) -> tuple[bool, str | None, str | None]
             return True, inj_type, details
 
     return False, None, None
+
+
+def check_command_warnings(command: str) -> list[str]:
+    """Detect ordinary shell constructs worth noting (non-critical).
+
+    These used to be classified as critical injection, which killed agent
+    turns on everyday commands. They are reported as warnings instead so the
+    classification stays observable without being fatal.
+    """
+    warnings: list[str] = []
+    warning_patterns = [
+        # Command substitution — idiomatic shell; the AST pass already lists
+        # it as a medium-severity `dangerous` pattern.
+        (r"\$\([^)]+\)", "command_substitution"),
+        (r"`[^`]+`", "backtick_substitution"),
+        # Multi-line command — ordinary shell syntax; the sandbox containment
+        # applies to the whole script.
+        (r"\n\s*\w+", "multiline_command"),
+    ]
+    for pattern, name in warning_patterns:
+        if re.search(pattern, command):
+            warnings.append(name)
+    return warnings
 
 
 def check_zsh_bypass(command: str) -> tuple[bool, str | None]:
@@ -366,7 +395,7 @@ def analyze_command_security(command: str) -> BashSecurityResult:
     Returns:
         BashSecurityResult with detailed findings
     """
-    warnings = []
+    warnings = check_command_warnings(command)
 
     # Parse the command
     parser = BashASTParser()
@@ -415,6 +444,13 @@ def analyze_command_security(command: str) -> BashSecurityResult:
         for node in ast.find_all("BACKTICK"):
             dangerous.append("backtick_substitution")
             break
+
+    # The AST does not model command substitution as its own node type, so
+    # surface it here as a dangerous (medium) pattern: detected and logged,
+    # but not turn-killing. (Multi-line commands stay warnings only.)
+    for name in check_command_warnings(command):
+        if name in ("command_substitution", "backtick_substitution") and name not in dangerous:
+            dangerous.append(name)
 
     # Check for dangerous prefixes
     dangerous_prefixes = [
