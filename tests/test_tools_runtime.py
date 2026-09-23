@@ -1828,6 +1828,35 @@ def test_bash_background_without_task_runtime_raises_tool_error(tmp_path) -> Non
     assert "task runtime" in str(exc_info.value)
 
 
+def test_bash_injects_git_ceiling_when_fs_root_set(tmp_path, monkeypatch) -> None:
+    """A contained bash command's child env carries GIT_CEILING_DIRECTORIES
+    set to the resolved PYCLAW_FS_ROOT, so git repository searches from the
+    containment root cannot walk up into a host repository."""
+    from py_claw.tools.local_shell import BashTool
+
+    monkeypatch.setenv("PYCLAW_FS_ROOT", str(tmp_path))
+    tool = BashTool(task_runtime=None)
+    arguments = tool.definition.input_model.model_validate({"command": "env"})
+
+    result = tool.execute(arguments, cwd=str(tmp_path))
+
+    assert f"GIT_CEILING_DIRECTORIES={tmp_path.resolve()}" in str(result["stdout"])
+
+
+def test_bash_no_git_ceiling_without_fs_root(tmp_path, monkeypatch) -> None:
+    """Without PYCLAW_FS_ROOT there is no containment and no env change —
+    unconstrained deployments behave exactly as before."""
+    from py_claw.tools.local_shell import BashTool
+
+    monkeypatch.delenv("PYCLAW_FS_ROOT", raising=False)
+    tool = BashTool(task_runtime=None)
+    arguments = tool.definition.input_model.model_validate({"command": "env"})
+
+    result = tool.execute(arguments, cwd=str(tmp_path))
+
+    assert "GIT_CEILING_DIRECTORIES=" not in str(result["stdout"])
+
+
 
 def test_task_output_and_stop_validate_unknown_ids(tmp_path) -> None:
     runtime = ToolRuntime()

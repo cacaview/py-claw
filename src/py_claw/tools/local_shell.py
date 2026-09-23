@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
+from pathlib import Path
 from typing import TextIO
 
 from pydantic import BaseModel, Field
@@ -58,6 +60,33 @@ def _ast_to_security_result(ast_result: BashSecurityResult) -> BashSecurityCheck
         warnings=warnings,
         severity=severity_str,  # type: ignore[arg-type]
     )
+
+
+def _git_containment_env() -> dict[str, str] | None:
+    """Child-env addition that keeps ``git`` repository searches inside the
+    ``PYCLAW_FS_ROOT`` containment root, or ``None`` when no root is set.
+
+    ``GIT_CEILING_DIRECTORIES`` stops git from walking UP past the given
+    directory boundary when it searches for a repository root. Without it, a
+    bare ``git`` command run below the containment root (which has no
+    ``.git`` of its own) keeps walking up until it finds a repository
+    OUTSIDE the root — e.g. the host checkout the sandbox was carved out of —
+    and can create branches and commits there.
+
+    Layering note (verified empirically against git 2.x): the ceiling only
+    blocks a search that STARTS strictly BELOW the ceiling directory — a
+    search that starts exactly AT the ceiling is not blocked (equality does
+    not count as "inside"). The containing harness therefore ALSO plants an
+    empty repository at the containment root so a search starting at the root
+    stops there; this env layer covers the below-root starts, including after
+    the protective ``.git`` has been removed. ``None`` (no env change) when
+    ``PYCLAW_FS_ROOT`` is unset or empty, so deployments without containment
+    behave exactly as before.
+    """
+    raw = os.environ.get("PYCLAW_FS_ROOT", "").strip()
+    if not raw:
+        return None
+    return {"GIT_CEILING_DIRECTORIES": str(Path(raw).expanduser().resolve())}
 
 
 class BashToolInput(BaseModel):
@@ -142,10 +171,15 @@ class BashTool:
         if bash_path is None:
             raise ToolError("bash executable not found")
         timeout_ms = arguments.timeout or 120000
+        env = dict(os.environ)
+        ceiling = _git_containment_env()
+        if ceiling is not None:
+            env.update(ceiling)
         try:
             completed = subprocess.run(
                 [bash_path, "-lc", arguments.command],
                 cwd=cwd,
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=timeout_ms / 1000,
@@ -179,6 +213,7 @@ class BashTool:
             process = subprocess.Popen(
                 [bash_path, "-lc", arguments.command],
                 cwd=cwd,
+                env=dict(os.environ, **(_git_containment_env() or {})),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
